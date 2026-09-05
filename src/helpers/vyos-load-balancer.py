@@ -29,7 +29,6 @@ from vyos.utils.network import get_interface_address
 from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
 from vyos.xml_ref import get_defaults
-from vyos.wanloadbalance import health_ping_host
 from vyos.wanloadbalance import health_ping_host_metrics
 from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
