@@ -44,28 +44,39 @@ sleep_interval = 5
 def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
     sla_conf = health_conf.get('sla', {})
     try:
-        m_val = int(sla_conf.get('max_latency', 200))
+        h_val = int(sla_conf.get('max_latency', 200))
     except Exception:
-        m_val = 200
+        h_val = 200
     try:
-        h_percent = int(sla_conf.get('max_loss', 100))
+        m_percent = int(sla_conf.get('max_loss', 100))
     except Exception:
-        h_percent = 100
-    h_ratio = h_percent / 100.0
-    if h_ratio <= 0:
-        h_ratio = 1.0
-    if h_ratio > 1.0:
-        h_ratio = 1.0
+        m_percent = 100
+    try:
+        c_val = int(sla_conf.get('penalty_baseline', 50))
+    except Exception:
+        c_val = 50
+    if c_val < 1:
+        c_val = 1
+    if c_val > 99:
+        c_val = 99
+    m_ratio = m_percent / 100.0
+    if m_ratio <= 0:
+        m_ratio = 1.0
+    if m_ratio > 1.0:
+        m_ratio = 1.0
     if loss_ratio is None:
         loss_ratio = 0.0
     if latency_ms is None:
-        latency_ms = float(m_val)
-    penalty = sla_penalty(latency_ms, loss_ratio, float(m_val), h_ratio)
+        latency_ms = float(h_val)
+    penalty = sla_penalty(float(latency_ms), float(loss_ratio), float(h_val), float(m_ratio), int(c_val))
     factor = sla_factor_from_penalty(penalty)
     return {
-        'm': m_val,
-        'h_percent': h_percent,
-        'h_ratio': h_ratio,
+        'm': m_percent,
+        'm_ratio': m_ratio,
+        'h': h_val,
+        'c': c_val,
+        'h_percent': h_val,
+        'm_percent': m_percent,
         'latency': float(latency_ms),
         'loss': float(loss_ratio),
         'penalty': float(penalty),
@@ -80,7 +91,8 @@ def health_check(ifname, conf, state, test_defaults):
         state['sla_penalty'] = sla_res['penalty']
         state['sla_factor'] = 0.0
         state['sla_m'] = sla_res['m']
-        state['sla_h'] = sla_res['h_percent']
+        state['sla_h'] = sla_res['h']
+        state['sla_c'] = sla_res['c']
         return False
 
     collected_latency = None
@@ -102,7 +114,8 @@ def health_check(ifname, conf, state, test_defaults):
         state['sla_penalty'] = sla_res['penalty']
         state['sla_factor'] = sla_res['factor']
         state['sla_m'] = sla_res['m']
-        state['sla_h'] = sla_res['h_percent']
+        state['sla_h'] = sla_res['h']
+        state['sla_c'] = sla_res['c']
         return success
 
     overall_success = True
@@ -147,7 +160,8 @@ def health_check(ifname, conf, state, test_defaults):
         state['sla_penalty'] = sla_res['penalty']
         state['sla_factor'] = sla_res['factor']
         state['sla_m'] = sla_res['m']
-        state['sla_h'] = sla_res['h_percent']
+        state['sla_h'] = sla_res['h']
+        state['sla_c'] = sla_res['c']
     else:
         if 'sla_factor' not in state:
             state['sla_factor'] = 1.0
@@ -156,7 +170,8 @@ def health_check(ifname, conf, state, test_defaults):
             state['sla_loss'] = 0.0
             sla_res = sla_compute(ifname, conf, 0.0, 0.0)
             state['sla_m'] = sla_res['m']
-            state['sla_h'] = sla_res['h_percent']
+            state['sla_h'] = sla_res['h']
+            state['sla_c'] = sla_res['c']
 
     return overall_success
 
@@ -346,13 +361,21 @@ if __name__ == '__main__':
             addr = get_ipv4_address(ifname)
             sla_conf = health_conf.get('sla', {})
             try:
-                sla_m = int(sla_conf.get('max_latency', 200))
+                sla_h = int(sla_conf.get('max_latency', 200))
             except Exception:
-                sla_m = 200
+                sla_h = 200
             try:
-                sla_h = int(sla_conf.get('max_loss', 100))
+                sla_m = int(sla_conf.get('max_loss', 100))
             except Exception:
-                sla_h = 100
+                sla_m = 100
+            try:
+                sla_c = int(sla_conf.get('penalty_baseline', 50))
+            except Exception:
+                sla_c = 50
+            if sla_c < 1:
+                sla_c = 1
+            if sla_c > 99:
+                sla_c = 99
             lb['health_state'][ifname] = {
                 'if_addr': addr,
                 'failure_count': 0,
@@ -369,6 +392,7 @@ if __name__ == '__main__':
                 'sla_loss': 0.0,
                 'sla_m': sla_m,
                 'sla_h': sla_h,
+                'sla_c': sla_c,
                 'sla_weight_changed': False,
             }
 

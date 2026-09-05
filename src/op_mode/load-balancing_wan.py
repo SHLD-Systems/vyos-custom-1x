@@ -33,8 +33,9 @@ Last Status Change: {last_change}
 Last Interface Success: {last_success}
 Last Interface Failure: {last_failure}
 Interface Failures: {failures}
-SLA Latency: {sla_latency} ms (M={sla_m} ms)
-SLA Loss: {sla_loss}% (H={sla_h}%)
+SLA Latency: {sla_latency} ms (H={sla_h} ms)
+SLA Loss: {sla_loss}% (M={sla_m}%)
+SLA Baseline: {sla_c}%
 SLA Penalty: {sla_penalty}
 SLA Factor: {sla_factor}
 Effective Weight Factor: {sla_factor}
@@ -82,8 +83,9 @@ def _get_formatted_output(raw_data):
             'sla_loss': f"{if_data.get('sla_loss', 0.0)*100:.1f}" if if_data.get('sla_loss', 0) <= 1 else f"{if_data.get('sla_loss', 0):.1f}",
             'sla_penalty': f"{if_data.get('sla_penalty', 0.0):.3f}",
             'sla_factor': f"{if_data.get('sla_factor', 1.0):.3f}",
-            'sla_m': if_data.get('sla_m', 200),
-            'sla_h': if_data.get('sla_h', 100),
+            'sla_m': if_data.get('sla_m', 100),
+            'sla_h': if_data.get('sla_h', 200),
+            'sla_c': if_data.get('sla_c', 50),
         }
         print(status_format.format(**fmt_data))
 

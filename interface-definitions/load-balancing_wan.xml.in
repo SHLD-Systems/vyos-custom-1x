@@ -121,7 +121,7 @@
                 <children>
                   <leafNode name="max-latency">
                     <properties>
-                      <help>Reference/maximum latency M in milliseconds for penalty calculation</help>
+                      <help>Latency threshold H in milliseconds for penalty calculation</help>
                       <valueHelp>
                         <format>u32:1-10000</format>
                         <description>Latency in milliseconds</description>
@@ -134,7 +134,7 @@
                   </leafNode>
                   <leafNode name="max-loss">
                     <properties>
-                      <help>Maximum loss threshold H in percent (1-100) for penalty calculation</help>
+                      <help>Maximum loss M in percent (1-100) for penalty calculation</help>
                       <valueHelp>
                         <format>u32:1-100</format>
                         <description>Loss threshold in percent</description>
@@ -144,6 +144,19 @@
                       </constraint>
                     </properties>
                     <defaultValue>100</defaultValue>
+                  </leafNode>
+                  <leafNode name="penalty-baseline">
+                    <properties>
+                      <help>Penalty baseline factor C as percentage (1-99) scaling penalty magnitude</help>
+                      <valueHelp>
+                        <format>u32:1-99</format>
+                        <description>Baseline factor in percent</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 1-99"/>
+                      </constraint>
+                    </properties>
+                    <defaultValue>50</defaultValue>
                   </leafNode>
                 </children>
               </node>

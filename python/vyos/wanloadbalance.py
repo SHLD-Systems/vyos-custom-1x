@@ -171,15 +171,25 @@ def wlb_weight_interfaces(rule_conf, health_state):
 
     return out, total_weight
 
-def sla_penalty(l, L, M, H):
-    if M <= 0 or H <= 0:
+def sla_penalty(latency, loss, H, M, C=50):
+    if H <= 0 or M <= 0:
         return 1.0
-    if L < 0:
-        L = 0.0
-    if H <= L:
+    if loss < 0:
+        loss = 0.0
+    if latency < 0:
+        latency = 0.0
+    if latency >= H:
         return 1.0
+    if loss >= M:
+        return 1.0
+    if C < 1:
+        C = 1
+    if C > 99:
+        C = 99
     try:
-        penalty = (l / M) * (1.0 / (H - L))
+        loss_component = 1.0 / (1.0 - loss / M)
+        latency_component = H / (H - latency)
+        penalty = loss_component * latency_component * (C / 100.0)
     except ZeroDivisionError:
         return 1.0
     if penalty > 1.0:
@@ -196,8 +206,8 @@ def sla_factor_from_penalty(penalty):
         factor = 1.0
     return factor
 
-def sla_effective_weight(base_weight, l, L, M, H):
-    penalty = sla_penalty(l, L, M, H)
+def sla_effective_weight(base_weight, latency, loss, H, M, C=50):
+    penalty = sla_penalty(latency, loss, H, M, C)
     factor = sla_factor_from_penalty(penalty)
     weight = max(1, int(base_weight * factor))
     return weight, penalty, factor
