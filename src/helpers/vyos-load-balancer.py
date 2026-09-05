@@ -30,46 +30,104 @@ from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
 from vyos.xml_ref import get_defaults
 from vyos.wanloadbalance import health_ping_host
+from vyos.wanloadbalance import health_ping_host_metrics
 from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
 from vyos.wanloadbalance import parse_ppp_nexthop
+from vyos.wanloadbalance import sla_factor_from_penalty
+from vyos.wanloadbalance import sla_penalty
 
 nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
-sleep_interval = 5 # Main loop sleep interval
+sleep_interval = 5
+
+def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
+    sla_conf = health_conf.get('sla', {})
+    try:
+        m_val = int(sla_conf.get('max_latency', 200))
+    except Exception:
+        m_val = 200
+    try:
+        h_percent = int(sla_conf.get('max_loss', 100))
+    except Exception:
+        h_percent = 100
+    h_ratio = h_percent / 100.0
+    if h_ratio <= 0:
+        h_ratio = 1.0
+    if h_ratio > 1.0:
+        h_ratio = 1.0
+    if loss_ratio is None:
+        loss_ratio = 0.0
+    if latency_ms is None:
+        latency_ms = float(m_val)
+    penalty = sla_penalty(latency_ms, loss_ratio, float(m_val), h_ratio)
+    factor = sla_factor_from_penalty(penalty)
+    return {
+        'm': m_val,
+        'h_percent': h_percent,
+        'h_ratio': h_ratio,
+        'latency': float(latency_ms),
+        'loss': float(loss_ratio),
+        'penalty': float(penalty),
+        'factor': float(factor),
+    }
 
 def health_check(ifname, conf, state, test_defaults):
-    # Run health tests for interface
-
     if get_ipv4_address(ifname) is None:
+        state['sla_latency'] = 0.0
+        state['sla_loss'] = 1.0
+        sla_res = sla_compute(ifname, conf, state['sla_latency'], state['sla_loss'])
+        state['sla_penalty'] = sla_res['penalty']
+        state['sla_factor'] = 0.0
+        state['sla_m'] = sla_res['m']
+        state['sla_h'] = sla_res['h_percent']
         return False
+
+    collected_latency = None
+    collected_loss = None
 
     if 'test' not in conf:
         resp_time = test_defaults['resp-time']
         target = conf['nexthop']
-
         if target == 'dhcp':
             target = state['dhcp_nexthop']
-
         if not target:
             return False
+        success, loss_ratio, avg_rtt, rc, out = health_ping_host_metrics(target, ifname, count=3, wait_time=resp_time)
+        collected_latency = avg_rtt if avg_rtt is not None else 0.0
+        collected_loss = loss_ratio if loss_ratio is not None else (0.0 if success else 1.0)
+        state['sla_latency'] = float(collected_latency)
+        state['sla_loss'] = float(collected_loss)
+        sla_res = sla_compute(ifname, conf, collected_latency, collected_loss)
+        state['sla_penalty'] = sla_res['penalty']
+        state['sla_factor'] = sla_res['factor']
+        state['sla_m'] = sla_res['m']
+        state['sla_h'] = sla_res['h_percent']
+        return success
 
-        return health_ping_host(target, ifname, wait_time=resp_time)
-
+    overall_success = True
     for test_id, test_conf in conf['test'].items():
         check_type = test_conf['type']
-
         if check_type == 'ping':
             resp_time = test_conf['resp_time']
             target = test_conf['target']
-            if not health_ping_host(target, ifname, wait_time=resp_time):
-                return False
+            success, loss_ratio, avg_rtt, rc, out = health_ping_host_metrics(target, ifname, count=3, wait_time=resp_time)
+            if collected_latency is None:
+                collected_latency = avg_rtt if avg_rtt is not None else 0.0
+                collected_loss = loss_ratio if loss_ratio is not None else (0.0 if success else 1.0)
+            else:
+                if avg_rtt is not None:
+                    collected_latency = (collected_latency + avg_rtt) / 2.0
+                if loss_ratio is not None:
+                    collected_loss = max(collected_loss, loss_ratio)
+            if not success:
+                overall_success = False
         elif check_type == 'ttl':
             target = test_conf['target']
             ttl_limit = test_conf['ttl_limit']
             if not health_ping_host_ttl(target, ifname, ttl_limit=ttl_limit):
-                return False
+                overall_success = False
         elif check_type == 'user-defined':
             script = test_conf['test_script']
             env = os.environ.copy()
@@ -81,9 +139,27 @@ def health_check(ifname, conf, state, test_defaults):
             )
             rc = run(script, env=env)
             if rc != 0:
-                return False
+                overall_success = False
 
-    return True
+    if collected_latency is not None and collected_loss is not None:
+        state['sla_latency'] = float(collected_latency)
+        state['sla_loss'] = float(collected_loss)
+        sla_res = sla_compute(ifname, conf, collected_latency, collected_loss)
+        state['sla_penalty'] = sla_res['penalty']
+        state['sla_factor'] = sla_res['factor']
+        state['sla_m'] = sla_res['m']
+        state['sla_h'] = sla_res['h_percent']
+    else:
+        if 'sla_factor' not in state:
+            state['sla_factor'] = 1.0
+            state['sla_penalty'] = 0.0
+            state['sla_latency'] = 0.0
+            state['sla_loss'] = 0.0
+            sla_res = sla_compute(ifname, conf, 0.0, 0.0)
+            state['sla_m'] = sla_res['m']
+            state['sla_h'] = sla_res['h_percent']
+
+    return overall_success
 
 def on_state_change(lb, ifname, state):
     # Run hook on state change
@@ -251,6 +327,14 @@ if __name__ == '__main__':
         time.sleep(1)
 
     lb = get_config()
+    try:
+        sleep_interval = int(lb.get('interval', 5))
+        if sleep_interval < 1:
+            sleep_interval = 1
+        if sleep_interval > 4294967295:
+            sleep_interval = 4294967295
+    except Exception:
+        sleep_interval = 5
 
     lb['health_state'] = {}
     lb['mark_offset'] = 0xc8
@@ -261,6 +345,15 @@ if __name__ == '__main__':
         for ifname, health_conf in lb['interface_health'].items():
             table_num = lb['mark_offset'] + index
             addr = get_ipv4_address(ifname)
+            sla_conf = health_conf.get('sla', {})
+            try:
+                sla_m = int(sla_conf.get('max_latency', 200))
+            except Exception:
+                sla_m = 200
+            try:
+                sla_h = int(sla_conf.get('max_loss', 100))
+            except Exception:
+                sla_h = 100
             lb['health_state'][ifname] = {
                 'if_addr': addr,
                 'failure_count': 0,
@@ -270,7 +363,14 @@ if __name__ == '__main__':
                 'state': addr is not None,
                 'state_changed': False,
                 'table_number': table_num,
-                'mark': hex(table_num)
+                'mark': hex(table_num),
+                'sla_factor': 1.0,
+                'sla_penalty': 0.0,
+                'sla_latency': 0.0,
+                'sla_loss': 0.0,
+                'sla_m': sla_m,
+                'sla_h': sla_h,
+                'sla_weight_changed': False,
             }
 
             if health_conf['nexthop'] == 'dhcp':
@@ -343,12 +443,21 @@ if __name__ == '__main__':
     try:
         while True:
             ip_change = False
+            sla_weight_changed = False
 
             if 'interface_health' in lb:
                 for ifname, health_conf in lb['interface_health'].items():
                     state = lb['health_state'][ifname]
+                    old_factor = state.get('sla_factor', 1.0)
 
                     result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
+
+                    new_factor = state.get('sla_factor', 1.0)
+                    if abs(new_factor - old_factor) > 0.01:
+                        state['sla_weight_changed'] = True
+                        sla_weight_changed = True
+                    else:
+                        state['sla_weight_changed'] = False
 
                     state_changed = result != state['state']
                     state['state_changed'] = False
@@ -368,11 +477,9 @@ if __name__ == '__main__':
                             state['state'] = False
                             state['state_changed'] = True
 
-                    #Force state changed to trigger the first write
                     if init == True:
                         state['state_changed'] = True
-                        init = False
-
+                        sla_weight_changed = True
                     if state['state_changed']:
                         state['if_addr'] = get_ipv4_address(ifname)
                         on_state_change(lb, ifname, state['state'])
@@ -382,7 +489,10 @@ if __name__ == '__main__':
 
                     restore_default_route(lb, ifname)
 
-            if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
+                if init == True:
+                    init = False
+
+            if any(state['state_changed'] for ifname, state in lb['health_state'].items()) or sla_weight_changed:
                 if not nftables_update(lb):
                     break
 
@@ -396,6 +506,8 @@ if __name__ == '__main__':
                     f.write(json.dumps(lb['health_state']))
             elif ip_change:
                 nftables_update(lb)
+                with open(wlb_status_file, 'w') as f:
+                    f.write(json.dumps(lb['health_state']))
 
             time.sleep(sleep_interval)
     except Exception as e:

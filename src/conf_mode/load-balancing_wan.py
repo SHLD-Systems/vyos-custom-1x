@@ -69,6 +69,23 @@ def verify(lb):
             if 'nexthop' not in health_conf:
                 raise ConfigError(f'Nexthop must be configured for interface {ifname}')
 
+            if 'sla' in health_conf:
+                sla = health_conf['sla']
+                if 'max_latency' in sla:
+                    try:
+                        ml = int(sla['max_latency'])
+                        if ml < 1 or ml > 10000:
+                            raise ConfigError(f'SLA max-latency must be 1-10000 ms for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA max-latency for interface {ifname}')
+                if 'max_loss' in sla:
+                    try:
+                        mh = int(sla['max_loss'])
+                        if mh < 1 or mh > 100:
+                            raise ConfigError(f'SLA max-loss must be 1-100 percent for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA max-loss for interface {ifname}')
+
             if 'test' not in health_conf:
                 continue
 

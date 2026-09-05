@@ -15,8 +15,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import re
 
 from vyos.defaults import directories
+from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
 
 dhclient_lease = 'dhclient_{0}.lease'
@@ -134,29 +136,99 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
     return " ".join(output)
 
 def wlb_weight_interfaces(rule_conf, health_state):
+    is_failover = 'failover' in rule_conf
     interfaces = []
 
     for ifname, if_conf in rule_conf['interface'].items():
         if ifname in health_state and health_state[ifname]['state']:
-            weight = int(if_conf.get('weight', 1))
+            base_weight = int(if_conf.get('weight', 1))
+            if is_failover:
+                weight = base_weight
+            else:
+                sla_factor = health_state[ifname].get('sla_factor', 1.0)
+                try:
+                    sla_factor = float(sla_factor)
+                except Exception:
+                    sla_factor = 1.0
+                sla_factor = max(0.0, min(sla_factor, 1.0))
+                weight = max(1, int(base_weight * sla_factor))
             interfaces.append((ifname, weight))
 
     if not interfaces:
         return [], 0
 
-    if 'failover' in rule_conf:
+    if is_failover:
         for ifpair in sorted(interfaces, key=lambda i: i[1], reverse=True):
-            return [ifpair], ifpair[1] # Return highest weight interface that is ACTIVE when in failover
+            return [ifpair], ifpair[1]
 
     total_weight = sum(weight for _, weight in interfaces)
     out = []
     start = 0
-    for ifname, weight in sorted(interfaces, key=lambda i: i[1]): # build weight ranges
+    for ifname, weight in sorted(interfaces, key=lambda i: i[1]):
         end = start + weight - 1
         out.append((ifname, f'{start}-{end}' if end > start else start))
         start += weight
 
     return out, total_weight
+
+def sla_penalty(l, L, M, H):
+    if M <= 0 or H <= 0:
+        return 1.0
+    if L < 0:
+        L = 0.0
+    if H <= L:
+        return 1.0
+    try:
+        penalty = (l / M) * (1.0 / (H - L))
+    except ZeroDivisionError:
+        return 1.0
+    if penalty > 1.0:
+        penalty = 1.0
+    if penalty < 0.0:
+        penalty = 0.0
+    return penalty
+
+def sla_factor_from_penalty(penalty):
+    factor = 1.0 - penalty
+    if factor < 0.0:
+        factor = 0.0
+    if factor > 1.0:
+        factor = 1.0
+    return factor
+
+def sla_effective_weight(base_weight, l, L, M, H):
+    penalty = sla_penalty(l, L, M, H)
+    factor = sla_factor_from_penalty(penalty)
+    weight = max(1, int(base_weight * factor))
+    return weight, penalty, factor
+
+def _parse_ping_output(output):
+    loss_ratio = None
+    avg_rtt = None
+    m_loss = re.search(r'(\d+(?:\.\d+)?)% packet loss', output)
+    if m_loss:
+        try:
+            loss_ratio = float(m_loss.group(1)) / 100.0
+        except ValueError:
+            loss_ratio = None
+    m_rtt = re.search(r'rtt [^\n]*= [\d\.]+/([\d\.]+)/[\d\.]+/[\d\.]+', output)
+    if m_rtt:
+        try:
+            avg_rtt = float(m_rtt.group(1))
+        except ValueError:
+            avg_rtt = None
+    return loss_ratio, avg_rtt
+
+def health_ping_host_metrics(host, ifname, count=3, wait_time=5):
+    cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'
+    rc, out = rc_cmd(cmd_str)
+    loss_ratio, avg_rtt = _parse_ping_output(out)
+    if loss_ratio is None:
+        loss_ratio = 0.0 if rc == 0 else 1.0
+    if avg_rtt is None:
+        avg_rtt = 0.0
+    success = rc == 0 and loss_ratio < 1.0
+    return success, loss_ratio, avg_rtt, rc, out
 
 def health_ping_host(host, ifname, count=1, wait_time=0):
     cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'

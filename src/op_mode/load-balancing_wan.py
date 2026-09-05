@@ -33,6 +33,11 @@ Last Status Change: {last_change}
 Last Interface Success: {last_success}
 Last Interface Failure: {last_failure}
 Interface Failures: {failures}
+SLA Latency: {sla_latency} ms (M={sla_m} ms)
+SLA Loss: {sla_loss}% (H={sla_h}%)
+SLA Penalty: {sla_penalty}
+SLA Factor: {sla_factor}
+Effective Weight Factor: {sla_factor}
 '''
 
 def _verify(func):
@@ -72,7 +77,13 @@ def _get_formatted_output(raw_data):
             'last_change': change_dt.strftime("%Y-%m-%d %H:%M:%S") if change_dt else 'N/A',
             'last_success': str(now - success_dt) if success_dt else 'N/A',
             'last_failure': str(now - failure_dt) if failure_dt else 'N/A',
-            'failures': if_data['failure_count']
+            'failures': if_data['failure_count'],
+            'sla_latency': f"{if_data.get('sla_latency', 0.0):.2f}",
+            'sla_loss': f"{if_data.get('sla_loss', 0.0)*100:.1f}" if if_data.get('sla_loss', 0) <= 1 else f"{if_data.get('sla_loss', 0):.1f}",
+            'sla_penalty': f"{if_data.get('sla_penalty', 0.0):.3f}",
+            'sla_factor': f"{if_data.get('sla_factor', 1.0):.3f}",
+            'sla_m': if_data.get('sla_m', 200),
+            'sla_h': if_data.get('sla_h', 100),
         }
         print(status_format.format(**fmt_data))
 

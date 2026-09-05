@@ -1,0 +1,6 @@
+from vyos.configtree import ConfigTree
+
+base = ['load-balancing', 'wan']
+
+def migrate(config: ConfigTree) -> None:
+    pass
