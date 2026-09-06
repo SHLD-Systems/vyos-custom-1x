@@ -90,6 +90,13 @@ def verify(lb):
                             raise ConfigError(f'SLA max-loss must be 1-100 percent for interface {ifname}')
                     except ValueError:
                         raise ConfigError(f'Invalid SLA max-loss for interface {ifname}')
+                if 'penalty_baseline' in sla:
+                    try:
+                        pb = int(sla['penalty_baseline'])
+                        if pb < 1 or pb > 99:
+                            raise ConfigError(f'SLA penalty-baseline must be 1-99 percent for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA penalty-baseline for interface {ifname}')
 
             if 'test' not in health_conf:
                 continue
@@ -100,6 +107,21 @@ def verify(lb):
 
                 if test_conf['type'] == 'user-defined' and 'test_script' not in test_conf:
                     raise ConfigError(f'Missing user-defined script for health test on interface {ifname}')
+
+                if 'ping_count' in test_conf:
+                    try:
+                        pc = int(test_conf['ping_count'])
+                        if pc < 1 or pc > 50:
+                            raise ConfigError(f'ping-count must be 1-50 for interface {ifname} test {test_id}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid ping-count for interface {ifname} test {test_id}')
+                if 'ping_interval' in test_conf:
+                    try:
+                        pi = float(test_conf['ping_interval'])
+                        if pi < 0.1 or pi > 5:
+                            raise ConfigError(f'ping-interval must be 0.1-5 seconds for interface {ifname} test {test_id}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid ping-interval for interface {ifname} test {test_id}')
     else:
         raise ConfigError('Interface health tests must be configured')
 

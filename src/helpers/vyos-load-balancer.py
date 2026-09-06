@@ -139,10 +139,18 @@ def health_check(ifname, conf, state, test_defaults):
     for test_id, test_conf in conf['test'].items():
         check_type = test_conf['type']
         if check_type == 'ping':
-            # Use metrics ping for SLA (3 packets) while retaining boolean success for health threshold
+            # Use metrics ping for SLA while retaining boolean success; per-test ping-count/interval tunable (defaults 3 / 1s)
             resp_time = test_conf['resp_time']
             target = test_conf['target']
-            success, loss_ratio, avg_rtt, rc, out = health_ping_host_metrics(target, ifname, count=3, wait_time=resp_time)
+            try:
+                ping_count = int(test_conf.get('ping_count', 3))
+            except Exception:
+                ping_count = 3
+            try:
+                ping_interval = float(test_conf.get('ping_interval', 1.0))
+            except Exception:
+                ping_interval = 1.0
+            success, loss_ratio, avg_rtt, rc, out = health_ping_host_metrics(target, ifname, count=ping_count, wait_time=resp_time, interval=ping_interval)
             if collected_latency is None:
                 collected_latency = avg_rtt if avg_rtt is not None else 0.0
                 collected_loss = loss_ratio if loss_ratio is not None else (0.0 if success else 1.0)

@@ -185,6 +185,32 @@
                     </properties>
                     <defaultValue>5</defaultValue>
                   </leafNode>
+                  <leafNode name="ping-count">
+                    <properties>
+                      <help>Number of ping packets to send per health check</help>
+                      <valueHelp>
+                        <format>u32:1-50</format>
+                        <description>Packet count</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 1-50"/>
+                      </constraint>
+                    </properties>
+                    <defaultValue>3</defaultValue>
+                  </leafNode>
+                  <leafNode name="ping-interval">
+                    <properties>
+                      <help>Interval between ping packets in seconds (frequency)</help>
+                      <valueHelp>
+                        <format>txt</format>
+                        <description>Seconds 0.1-5</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0.1-5"/>
+                      </constraint>
+                    </properties>
+                    <defaultValue>1</defaultValue>
+                  </leafNode>
                   <leafNode name="target">
                     <properties>
                       <help>Health target address</help>

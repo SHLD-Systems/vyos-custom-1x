@@ -289,8 +289,24 @@ def _parse_ping_output(output):
 # loss_ratio, avg_rtt, rc, out). Success is rc==0 and loss<1.0 (at least one reply) – boolean health remains
 # lenient so moderate loss reduces weight via SLA factor rather than immediately marking FAILED; full loss still
 # drives penalty 1.0 and may be filtered to 0 bins in proportional mode.
-def health_ping_host_metrics(host, ifname, count=3, wait_time=5):
-    cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'
+def health_ping_host_metrics(host, ifname, count=3, wait_time=5, interval=1.0):
+    try:
+        count = int(count)
+    except Exception:
+        count = 3
+    if count < 1:
+        count = 1
+    if count > 50:
+        count = 50
+    try:
+        interval = float(interval)
+    except Exception:
+        interval = 1.0
+    if interval < 0.1:
+        interval = 0.1
+    if interval > 5:
+        interval = 5
+    cmd_str = f'ping -c {count} -W {wait_time} -i {interval:g} -I {ifname} {host}'
     rc, out = rc_cmd(cmd_str)
     loss_ratio, avg_rtt = _parse_ping_output(out)
     if loss_ratio is None:
