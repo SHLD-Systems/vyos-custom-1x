@@ -69,6 +69,8 @@ def verify(lb):
             if 'nexthop' not in health_conf:
                 raise ConfigError(f'Nexthop must be configured for interface {ifname}')
 
+            # SLA thresholds are already constrained by XML validators; verify
+            # here provides clearer per-interface errors on manual edits
             if 'sla' in health_conf:
                 sla = health_conf['sla']
                 if 'max_latency' in sla:
@@ -85,6 +87,13 @@ def verify(lb):
                             raise ConfigError(f'SLA max-loss must be 1-100 percent for interface {ifname}')
                     except ValueError:
                         raise ConfigError(f'Invalid SLA max-loss for interface {ifname}')
+                if 'penalty_baseline' in sla:
+                    try:
+                        pb = int(sla['penalty_baseline'])
+                        if pb < 1 or pb > 99:
+                            raise ConfigError(f'SLA penalty-baseline must be 1-99 percent for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA penalty-baseline for interface {ifname}')
 
             if 'test' not in health_conf:
                 continue

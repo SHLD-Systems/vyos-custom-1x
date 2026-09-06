@@ -40,6 +40,8 @@ SLA Penalty: {sla_penalty}
 SLA Factor: {sla_factor}
 Effective Weight Factor: {sla_factor}
 '''
+# SLA fields: H=max-latency ms, M=max-loss %, C=baseline %; penalty 0-1,
+# factor 1-penalty applied as weight multiplier in nftables rules
 
 def _verify(func):
     """Decorator checks if WLB config exists"""
@@ -80,6 +82,7 @@ def _get_formatted_output(raw_data):
             'last_failure': str(now - failure_dt) if failure_dt else 'N/A',
             'failures': if_data['failure_count'],
             'sla_latency': f"{if_data.get('sla_latency', 0.0):.2f}",
+            # sla_loss stored as ratio 0-1 in health_state; display as percent
             'sla_loss': f"{if_data.get('sla_loss', 0.0)*100:.1f}" if if_data.get('sla_loss', 0) <= 1 else f"{if_data.get('sla_loss', 0):.1f}",
             'sla_penalty': f"{if_data.get('sla_penalty', 0.0):.3f}",
             'sla_factor': f"{if_data.get('sla_factor', 1.0):.3f}",

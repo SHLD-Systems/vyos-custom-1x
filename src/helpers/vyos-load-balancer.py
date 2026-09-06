@@ -40,8 +40,14 @@ nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
 sleep_interval = 5
+# Hysteresis for SLA weight changes to avoid nftables churn; triggers
+# reload only when factor delta exceeds this threshold
+WEIGHT_CHANGE_THRESHOLD = 0.01
 
 def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
+    # Resolve per-interface SLA thresholds (defaults: H=200ms, M=100%, C=50%)
+    # and compute penalty/factor via vyos.wanloadbalance helpers; returns
+    # dict with alias keys m/m_percent and h/h_percent for template compat
     sla_conf = health_conf.get('sla', {})
     try:
         h_val = int(sla_conf.get('max_latency', 200))
@@ -84,6 +90,8 @@ def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
     }
 
 def health_check(ifname, conf, state, test_defaults):
+    # No IPv4 => interface considered down; force SLA loss=100% and
+    # factor=0.0 (hardcoded, not derived) to de-preference interface
     if get_ipv4_address(ifname) is None:
         state['sla_latency'] = 0.0
         state['sla_loss'] = 1.0
@@ -98,6 +106,9 @@ def health_check(ifname, conf, state, test_defaults):
     collected_latency = None
     collected_loss = None
 
+    # Nexthop-only health check (no explicit test nodes): use 3-probe
+    # metrics ping against nexthop (dhcp-resolved if needed) to derive
+    # SLA latency/loss and success flag
     if 'test' not in conf:
         resp_time = test_defaults['resp-time']
         target = conf['nexthop']
@@ -118,6 +129,8 @@ def health_check(ifname, conf, state, test_defaults):
         state['sla_c'] = sla_res['c']
         return success
 
+    # Explicit test nodes: ping metrics feed SLA, ttl/user-defined only affect
+    # overall_success without SLA metrics
     overall_success = True
     for test_id, test_conf in conf['test'].items():
         check_type = test_conf['type']
@@ -341,6 +354,8 @@ if __name__ == '__main__':
         time.sleep(1)
 
     lb = get_config()
+    # Configurable health-check interval (load-balancing wan interval, default 5s)
+    # overrides module-level sleep_interval global for main loop pacing
     try:
         sleep_interval = int(lb.get('interval', 5))
         if sleep_interval < 1:
@@ -359,6 +374,8 @@ if __name__ == '__main__':
         for ifname, health_conf in lb['interface_health'].items():
             table_num = lb['mark_offset'] + index
             addr = get_ipv4_address(ifname)
+            # Initialize per-interface SLA state with defaults aligned to XML
+            # (H=200ms, M=100%, C=50%) for immediate status reporting
             sla_conf = health_conf.get('sla', {})
             try:
                 sla_h = int(sla_conf.get('max_latency', 200))
@@ -476,7 +493,7 @@ if __name__ == '__main__':
                     result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
 
                     new_factor = state.get('sla_factor', 1.0)
-                    if abs(new_factor - old_factor) > 0.01:
+                    if abs(new_factor - old_factor) > WEIGHT_CHANGE_THRESHOLD:
                         state['sla_weight_changed'] = True
                         sla_weight_changed = True
                     else:
@@ -515,6 +532,8 @@ if __name__ == '__main__':
                 if init == True:
                     init = False
 
+            # Reload nftables on hard state change or soft SLA weight drift
+            # (hysteresis via WEIGHT_CHANGE_THRESHOLD); also persist status
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()) or sla_weight_changed:
                 if not nftables_update(lb):
                     break
@@ -528,6 +547,8 @@ if __name__ == '__main__':
                 with open(wlb_status_file, 'w') as f:
                     f.write(json.dumps(lb['health_state']))
             elif ip_change:
+                # DHCP/nexthop IP change also needs nftables + status refresh
+                # (now writes wlb_status.json so op-mode shows fresh SLA metrics)
                 nftables_update(lb)
                 with open(wlb_status_file, 'w') as f:
                     f.write(json.dumps(lb['health_state']))

@@ -136,6 +136,9 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
     return " ".join(output)
 
 def wlb_weight_interfaces(rule_conf, health_state):
+    # SLA-aware weight distribution: healthy interfaces are weighted by
+    # base_weight * sla_factor (0.0-1.0 from daemon health_state); failover
+    # bypasses SLA scaling and picks highest-weight active interface only
     is_failover = 'failover' in rule_conf
     interfaces = []
 
@@ -172,6 +175,11 @@ def wlb_weight_interfaces(rule_conf, health_state):
     return out, total_weight
 
 def sla_penalty(latency, loss, H, M, C=50):
+    # Custom hyperbolic penalty: combines loss and latency distance to
+    # thresholds H (max-latency ms) and M (max-loss ratio 0-1) with baseline C%.
+    # Each component diverges as metric approaches threshold (H/(H-lat) and
+    # 1/(1-loss/M)), multiplied then scaled by C/100 and clamped 0-1.
+    # Returns 1.0 (max penalty) when thresholds exceeded or invalid.
     if H <= 0 or M <= 0:
         return 1.0
     if loss < 0:
@@ -199,6 +207,7 @@ def sla_penalty(latency, loss, H, M, C=50):
     return penalty
 
 def sla_factor_from_penalty(penalty):
+    # Invert penalty into usable weight factor: factor = 1 - penalty
     factor = 1.0 - penalty
     if factor < 0.0:
         factor = 0.0
@@ -206,13 +215,9 @@ def sla_factor_from_penalty(penalty):
         factor = 1.0
     return factor
 
-def sla_effective_weight(base_weight, latency, loss, H, M, C=50):
-    penalty = sla_penalty(latency, loss, H, M, C)
-    factor = sla_factor_from_penalty(penalty)
-    weight = max(1, int(base_weight * factor))
-    return weight, penalty, factor
-
 def _parse_ping_output(output):
+    # Parse iputils ping output; Linux-specific format:
+    # "% packet loss" and "rtt min/avg/max/mdev = ..." lines
     loss_ratio = None
     avg_rtt = None
     m_loss = re.search(r'(\d+(?:\.\d+)?)% packet loss', output)
@@ -230,6 +235,8 @@ def _parse_ping_output(output):
     return loss_ratio, avg_rtt
 
 def health_ping_host_metrics(host, ifname, count=3, wait_time=5):
+    # SLA metrics ping: 3 probes by default to derive loss ratio (0-1)
+    # and avg RTT; returns success only if rc==0 and loss <100%
     cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'
     rc, out = rc_cmd(cmd_str)
     loss_ratio, avg_rtt = _parse_ping_output(out)
@@ -241,6 +248,8 @@ def health_ping_host_metrics(host, ifname, count=3, wait_time=5):
     return success, loss_ratio, avg_rtt, rc, out
 
 def health_ping_host(host, ifname, count=1, wait_time=0):
+    # Legacy single-probe check retained for compatibility; new code
+    # prefers health_ping_host_metrics for SLA-aware decisions
     cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'
     rc = run(cmd_str)
     return rc == 0

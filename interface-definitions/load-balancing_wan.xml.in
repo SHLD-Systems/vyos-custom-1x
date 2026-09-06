@@ -47,6 +47,7 @@
               </constraint>
             </properties>
           </leafNode>
+          <!-- WLB SLA: configurable daemon loop interval (default 5s) replaces hardcoded sleep -->
           <leafNode name="interval">
             <properties>
               <help>Health check interval in seconds</help>
@@ -114,6 +115,7 @@
                 </properties>
                 <defaultValue>1</defaultValue>
               </leafNode>
+              <!-- SLA dynamic weight adjustment: H/max-latency, M/max-loss, C/baseline feed vyos.wanloadbalance.sla_penalty -->
               <node name="sla">
                 <properties>
                   <help>SLA-based dynamic weight adjustment</help>
