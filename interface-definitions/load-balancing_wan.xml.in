@@ -206,7 +206,7 @@
                         <description>Seconds 0.1-5</description>
                       </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--range 0.1-5"/>
+                        <validator name="numeric" argument="--range 0.1-5 --float"/>
                       </constraint>
                     </properties>
                     <defaultValue>1</defaultValue>
