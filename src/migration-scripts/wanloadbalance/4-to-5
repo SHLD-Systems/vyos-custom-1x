@@ -3,6 +3,4 @@ from vyos.configtree import ConfigTree
 base = ['load-balancing', 'wan']
 
 def migrate(config: ConfigTree) -> None:
-    # No-op migration: version bump 4->5 only adds optional interval/sla.*
-    # leaves with defaults; existing configs remain valid
     pass
