@@ -2,14 +2,13 @@
 
 Branch off `rolling` at `16f1cf4` (merge `d47c5bd90`). Adds SLA-based dynamic weight adjustment to WAN load-balancing. CLA-style: proportional rules scale `base_weight * sla_factor` via latency/loss penalty; failover rules keep static boolean path (mutually exclusive).
 
-## Commits (origin/rolling..HEAD)
+## Main Commits (origin/rolling..HEAD)
 
 - `7d145ef2c` first WLB SLA implementation
 - `cfbb12d0e` Fixed unused import bug with old ping checking logic
 - `468414c54` fixed SLA penalty with more accurate function and more knobs.
 - `441f61b49` Added comments and minor fixes.
 - `75bacf6d7` Revision of vmap assignment bug due to fractional SLA. Introduced normalized SLA effective weight assignment algorithm with edge case support
-- `d47c5bd90` Merge branch 'rolling' into feature/SLA-WLB
 
 ## Files touched (7) — `git diff origin/rolling..HEAD --stat` 460 insertions, 40 deletions
 

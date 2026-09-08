@@ -94,12 +94,12 @@ def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
     }
 
 # Extended health check that preserves original boolean ACTIVE/FAILED logic (failure_count/success_count)
-# while also collecting SLA metrics (avg RTT and loss ratio) via 3-packet ping for penalty calculation.
+# while also collecting SLA metrics (avg RTT and loss ratio) via ping for penalty calculation.
 # No-address -> immediate FAILED with sla_loss 1.0 and factor 0.0.
-# No test configured -> ping nexthop (dhcp resolved) with metrics.
+# No test configured -> ping nexthop (static or dhcp) with metrics.
 # With test list: ping type uses health_ping_host_metrics (3 packets, averages latency, max loss),
 # ttl/user-defined remain boolean only; after loop SLA state is updated from collected metrics
-# (or fallback to 0/0 -> factor 1.0 if only non-ping tests). Returns boolean overall_success for
+# (or fallback to 0/0 -> factor 1.0 / no SLA penalization if only non-ping tests). Returns boolean overall_success for
 # failure/success threshold counting, while side-effect updates state['sla_*'] used by wlb_weight_interfaces.
 def health_check(ifname, conf, state, test_defaults):
     if get_ipv4_address(ifname) is None:
@@ -140,6 +140,7 @@ def health_check(ifname, conf, state, test_defaults):
     # With tests configured: ping type uses health_ping_host_metrics (3 packets, averages latency, max loss),
     # ttl/user-defined remain boolean only; after loop SLA state is updated from collected metrics
     overall_success = True
+
     for test_id, test_conf in conf['test'].items():
         check_type = test_conf['type']
         if check_type == 'ping':
@@ -157,11 +158,13 @@ def health_check(ifname, conf, state, test_defaults):
                     collected_loss = max(collected_loss, loss_ratio)
             if not success:
                 overall_success = False
+
         elif check_type == 'ttl':
             target = test_conf['target']
             ttl_limit = test_conf['ttl_limit']
             if not health_ping_host_ttl(target, ifname, ttl_limit=ttl_limit):
                 overall_success = False
+
         elif check_type == 'user-defined':
             script = test_conf['test_script']
             env = os.environ.copy()
