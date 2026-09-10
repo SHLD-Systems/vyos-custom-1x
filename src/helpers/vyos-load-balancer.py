@@ -44,6 +44,7 @@ wlb_pid_file = '/run/wlb_daemon.pid'
 # Default health check loop interval seconds; overridden at startup from global
 # load-balancing wan interval leaf (u32:1-4294967295, default 5) via get_config()
 sleep_interval = 5
+SLA_FACTOR_DELTA_THRESHOLD=0.05
 
 # Compute SLA penalty/factor for an interface from measured latency/loss and configured thresholds.
 # H = max-latency ms (per-interface sla max-latency), M = max-loss ratio (max-loss%/100),
@@ -93,12 +94,12 @@ def sla_compute(ifname, health_conf, latency_ms, loss_ratio):
     }
 
 # Extended health check that preserves original boolean ACTIVE/FAILED logic (failure_count/success_count)
-# while also collecting SLA metrics (avg RTT and loss ratio) via 3-packet ping for penalty calculation.
+# while also collecting SLA metrics (avg RTT and loss ratio) via ping for penalty calculation.
 # No-address -> immediate FAILED with sla_loss 1.0 and factor 0.0.
-# No test configured -> ping nexthop (dhcp resolved) with metrics.
+# No test configured -> ping nexthop (static or dhcp) with metrics.
 # With test list: ping type uses health_ping_host_metrics (3 packets, averages latency, max loss),
 # ttl/user-defined remain boolean only; after loop SLA state is updated from collected metrics
-# (or fallback to 0/0 -> factor 1.0 if only non-ping tests). Returns boolean overall_success for
+# (or fallback to 0/0 -> factor 1.0 / no SLA penalization if only non-ping tests). Returns boolean overall_success for
 # failure/success threshold counting, while side-effect updates state['sla_*'] used by wlb_weight_interfaces.
 def health_check(ifname, conf, state, test_defaults):
     if get_ipv4_address(ifname) is None:
@@ -115,6 +116,7 @@ def health_check(ifname, conf, state, test_defaults):
     collected_latency = None
     collected_loss = None
 
+    # No test configured -> ping nexthop (dhcp resolved) with metrics for SLA, boolean success for threshold
     if 'test' not in conf:
         resp_time = test_defaults['resp-time']
         target = conf['nexthop']
@@ -135,7 +137,10 @@ def health_check(ifname, conf, state, test_defaults):
         state['sla_c'] = sla_res['c']
         return success
 
+    # With tests configured: ping type uses health_ping_host_metrics (3 packets, averages latency, max loss),
+    # ttl/user-defined remain boolean only; after loop SLA state is updated from collected metrics
     overall_success = True
+
     for test_id, test_conf in conf['test'].items():
         check_type = test_conf['type']
         if check_type == 'ping':
@@ -161,11 +166,13 @@ def health_check(ifname, conf, state, test_defaults):
                     collected_loss = max(collected_loss, loss_ratio)
             if not success:
                 overall_success = False
+
         elif check_type == 'ttl':
             target = test_conf['target']
             ttl_limit = test_conf['ttl_limit']
             if not health_ping_host_ttl(target, ifname, ttl_limit=ttl_limit):
                 overall_success = False
+
         elif check_type == 'user-defined':
             script = test_conf['test_script']
             env = os.environ.copy()
@@ -503,6 +510,7 @@ if __name__ == '__main__':
     # ensures single active interface always gets a bin even if heavily penalized.
 
     init = True;
+    sla_factor_map = { ifname: 0 for ifname in lb['interface_health'].keys() }
     try:
         while True:
             ip_change = False
@@ -511,13 +519,17 @@ if __name__ == '__main__':
             if 'interface_health' in lb:
                 for ifname, health_conf in lb['interface_health'].items():
                     state = lb['health_state'][ifname]
-                    old_factor = state.get('sla_factor', 1.0)
 
+                    # Track SLA factor changes to trigger vmap rebuild if >0.01 drift from previous value
+                    old_factor = sla_factor_map[ifname]
+
+                    # Run the health checks for the interface based on configured tests. Update state.
                     result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
 
+                    # Update SLA factor map and detect meaningful drift to avoid flapping on tiny RTT jitter
                     new_factor = state.get('sla_factor', 1.0)
-                    # Detect meaningful SLA factor drift (>0.01) to avoid flapping on tiny RTT jitter
-                    if abs(new_factor - old_factor) > 0.01:
+                    if abs(new_factor - old_factor) > SLA_FACTOR_DELTA_THRESHOLD:
+                        sla_factor_map[ifname] = new_factor
                         state['sla_weight_changed'] = True
                         sla_weight_changed = True
                     else:
