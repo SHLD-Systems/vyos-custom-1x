@@ -514,6 +514,25 @@
                   </leafNode>
                 </children>
               </node>
+              <node name="load-balancing">
+                <properties>
+                  <help>Load balancing</help>
+                </properties>
+                <children>
+                  <leafNode name="haproxy">
+                    <properties>
+                      <help>HAProxy load balancing</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                  <leafNode name="wan">
+                    <properties>
+                      <help>WAN load balancing</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
               <leafNode name="vpn">
                 <properties>
                   <help>Virtual Private Network (VPN)</help>
