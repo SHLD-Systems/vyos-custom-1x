@@ -57,6 +57,26 @@
                   <help>HTTP API key</help>
                 </properties>
               </leafNode>
+              <leafNode name="verify">
+                <properties>
+                  <help>Verify TLS certificate of secondary</help>
+                  <completionHelp>
+                    <list>true false</list>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>true</format>
+                    <description>Enable TLS certificate verification</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>false</format>
+                    <description>Disable TLS certificate verification</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>(true|false)</regex>
+                  </constraint>
+                </properties>
+                <defaultValue>false</defaultValue>
+              </leafNode>
             </children>
           </node>
           <leafNode name="mode">

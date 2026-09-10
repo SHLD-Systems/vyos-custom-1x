@@ -49,6 +49,7 @@ def post_request(
     data: str,
     params: Dict[str, Any],
     headers: Dict[str, str],
+    verify: bool = False,
 ) -> requests.Response:
     """Sends a POST request to the specified URL
 
@@ -56,17 +57,21 @@ def post_request(
         url (str): The URL to send the POST request to.
         data (Dict[str, Any]): The data to send with the POST request.
         headers (Dict[str, str]): The headers to include with the POST request.
+        verify (bool): Whether to verify TLS certificate
 
     Returns:
         requests.Response: The response object representing the server's response to the request
     """
+
+    if not verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     response = requests.post(
         url,
         data=data,
         params=params,
         headers=headers,
-        verify=False,
+        verify=verify,
         timeout=timeout,
     )
     return response
@@ -119,7 +124,8 @@ def set_remote_config(
         op: str,
         mask: Dict[str, Any],
         config: Dict[str, Any],
-        port: int) -> Optional[Dict[str, Any]]:
+        port: int,
+        verify: bool = False) -> Optional[Dict[str, Any]]:
     """Loads the VyOS configuration in JSON format to a remote host.
 
     Args:
@@ -137,9 +143,6 @@ def set_remote_config(
 
     headers = {'Content-Type': 'application/json'}
 
-    # Disable the InsecureRequestWarning
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
     url = f'https://{address}:{port}/configure-section'
     params = {
         # Ask the remote API to perform the configure and commit workflow asynchronously
@@ -153,7 +156,7 @@ def set_remote_config(
     })
 
     try:
-        config = post_request(url, data, params, headers)
+        config = post_request(url, data, params, headers, verify=verify)
         return config.json()
     except requests.exceptions.RequestException as e:
         print(f"An error occurred: {e}")
@@ -173,6 +176,7 @@ def config_sync(
     mode: str,
     secondary_port: int,
     exclusions: List[list[str]],
+    verify: bool = False,
 ):
     """Retrieve a config section from primary router in JSON format and send it to
        secondary router
@@ -192,11 +196,12 @@ def config_sync(
         f"Retrieved config for sections '{sections}': {config_dict}")
 
     set_config = set_remote_config(address=secondary_address,
-                                   key=secondary_key,
-                                   op=mode,
-                                   mask=mask_dict,
-                                   config=config_dict,
-                                   port=secondary_port)
+                                    key=secondary_key,
+                                    op=mode,
+                                    mask=mask_dict,
+                                    config=config_dict,
+                                    port=secondary_port,
+                                    verify=verify)
 
     logger.debug(f"Set config for sections '{sections}': {set_config}")
 
@@ -231,6 +236,13 @@ if __name__ == '__main__':
     secondary_port = int(config.get('secondary', {}).get('port', 443))
     sections = config.get('section')
     timeout = int(config.get('secondary', {}).get('timeout'))
+    _verify_raw = config.get('secondary', {}).get('verify', False)
+    if isinstance(_verify_raw, bool):
+        verify = _verify_raw
+    elif isinstance(_verify_raw, dict):
+        verify = True
+    else:
+        verify = str(_verify_raw).lower() == 'true'
 
     if not all([mode, secondary_address, secondary_key, sections]):
         logger.error("Missing required configuration data for config synchronization.")
@@ -255,4 +267,5 @@ if __name__ == '__main__':
         mode,
         secondary_port,
         exclude_list,
+        verify,
     )
