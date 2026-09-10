@@ -545,6 +545,14 @@
                   <valueless/>
                 </properties>
               </leafNode>
+              <tagNode name="exclude">
+                <properties>
+                  <help>Configuration path to exclude from synchronization (deep recursive – leaf matches at any depth under prefix)</help>
+                  <completionHelp>
+                    <path>interfaces ethernet</path>
+                  </completionHelp>
+                </properties>
+              </tagNode>
             </children>
           </node>
         </children>

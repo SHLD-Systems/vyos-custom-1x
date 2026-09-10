@@ -29,7 +29,7 @@ from vyos.configtree import ConfigTree
 from vyos.configtree import mask_inclusive
 from vyos.configtree import mask_exclusive
 from vyos.defaults import config_sync_exclusion_list
-from vyos.derivedtree import subtree_from_list_of_partial_paths
+from vyos.derivedtree import subtree_from_list_of_partial_paths_deep
 from vyos.template import bracketize_ipv6
 
 
@@ -101,7 +101,7 @@ def retrieve_config(
     exclude_list = exclusions
     # read local settings from Config
     # ... exclude_list += ...
-    mask_ex = subtree_from_list_of_partial_paths(config_tree, exclude_list)
+    mask_ex = subtree_from_list_of_partial_paths_deep(config_tree, exclude_list)
     mask_ex_str = json.dumps(exclude_list)
 
     masked = mask_inclusive(config_tree, mask_in)
@@ -231,6 +231,16 @@ if __name__ == '__main__':
     secondary_port = int(config.get('secondary', {}).get('port', 443))
     sections = config.get('section')
     timeout = int(config.get('secondary', {}).get('timeout'))
+    user_excludes = config.get('exclude', {})
+    if isinstance(user_excludes, dict):
+        for k in user_excludes.keys():
+            exclude_list.append(k.strip().split())
+    elif isinstance(user_excludes, list):
+        for k in user_excludes:
+            if isinstance(k, str):
+                exclude_list.append(k.strip().split())
+            elif isinstance(k, list):
+                exclude_list.append(k)
 
     if not all([mode, secondary_address, secondary_key, sections]):
         logger.error("Missing required configuration data for config synchronization.")

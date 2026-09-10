@@ -28,7 +28,7 @@ from vyos.configtree import ConfigTree
 from vyos.configtree import ConfigTreeError
 from vyos.configtree import DiffTree
 from vyos.config import Config
-from vyos.derivedtree import apply_exclusion_list
+from vyos.derivedtree import apply_exclusion_list_deep
 from vyos.derivedtree import DerivedTreeError
 from vyos.defaults import config_sync_exclusion_list
 
@@ -125,12 +125,23 @@ class ConfigSyncDiffManager:
             raise opmode.InternalError(f'Unable to build remote ConfigTree: {e}') from e
 
     def _get_exclude_list(self) -> list[list[str]]:
-        # add as instance method, for future access to CLI settings from self.Config
         exclude_file = Path(config_sync_exclusion_list)
         if not exclude_file.exists():
             raise opmode.InternalError('Config-sync exclusion list file not available')
 
-        return read_json(exclude_file, defaultonfailure=[])
+        base = read_json(exclude_file, defaultonfailure=[])
+        cfg = _read_json_config()
+        user = cfg.get('exclude', {})
+        if isinstance(user, dict):
+            for k in user.keys():
+                base.append(k.strip().split())
+        elif isinstance(user, list):
+            for k in user:
+                if isinstance(k, str):
+                    base.append(k.strip().split())
+                elif isinstance(k, list):
+                    base.append(k)
+        return base
 
     def _format_remote_diff(self, diff_tree: DiffTree, path: list, commands: bool):
         add_tree = diff_tree.add
@@ -206,8 +217,8 @@ class ConfigSyncDiffManager:
         exclude_list = self._get_exclude_list()
 
         try:
-            masked_local = apply_exclusion_list(local_tree, exclude_list)
-            masked_remote = apply_exclusion_list(remote_tree, exclude_list)
+            masked_local = apply_exclusion_list_deep(local_tree, exclude_list)
+            masked_remote = apply_exclusion_list_deep(remote_tree, exclude_list)
         except DerivedTreeError as e:
             raise opmode.InternalError(str(e)) from e
 

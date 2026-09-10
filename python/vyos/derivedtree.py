@@ -64,10 +64,80 @@ def subtree_from_list_of_partial_paths(
     return accumulator
 
 
+def _expand_deep_paths(
+    config_tree: ConfigTree, paths: list[list[str]]
+) -> list[list[str]]:
+    import json
+    try:
+        config_dict = json.loads(config_tree.to_json())
+    except Exception:
+        return paths
+    expanded: list[list[str]] = []
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        t = tuple(path)
+        if t not in seen:
+            seen.add(t)
+            expanded.append(path)
+        if len(path) < 2:
+            continue
+        prefix = path[:-1]
+        leaf = path[-1]
+        node = config_dict
+        found = True
+        for comp in prefix:
+            if isinstance(node, dict) and comp in node:
+                node = node[comp]
+            else:
+                found = False
+                break
+        if not found or not isinstance(node, dict):
+            continue
+        stack = [(node, prefix)]
+        while stack:
+            cur_node, cur_path = stack.pop()
+            if not isinstance(cur_node, dict):
+                continue
+            for k, v in cur_node.items():
+                new_path = cur_path + [k]
+                if k == leaf and tuple(new_path) not in seen:
+                    seen.add(tuple(new_path))
+                    expanded.append(new_path)
+                if isinstance(v, dict):
+                    stack.append((v, new_path))
+    return expanded
+
+
+def subtree_from_list_of_partial_paths_deep(
+    ctree: ConfigTree,
+    paths: list[list[str]],
+    accumulator: ConfigTree = None,
+    reference_tree: ReferenceTree = None,
+) -> ConfigTree:
+    expanded = _expand_deep_paths(ctree, paths)
+    return subtree_from_list_of_partial_paths(
+        ctree, expanded, accumulator, reference_tree
+    )
+
+
 def apply_exclusion_list(
     config_tree: ConfigTree, exclusion_list: list[list[str]]
 ) -> ConfigTree:
     mask_ex = subtree_from_list_of_partial_paths(config_tree, exclusion_list)
+    try:
+        masked = mask_exclusive(config_tree, mask_ex)
+    except ConfigTreeError as e:
+        raise DerivedTreeError(str(e)) from e
+
+    return masked
+
+
+def apply_exclusion_list_deep(
+    config_tree: ConfigTree, exclusion_list: list[list[str]]
+) -> ConfigTree:
+    mask_ex = subtree_from_list_of_partial_paths_deep(config_tree, exclusion_list)
     try:
         masked = mask_exclusive(config_tree, mask_ex)
     except ConfigTreeError as e:
