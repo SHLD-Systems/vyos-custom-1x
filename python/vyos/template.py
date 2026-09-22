@@ -431,6 +431,14 @@ def get_dhcp_router(interface):
 
     Returns None if no router is found, returns the IP address as string if
     a router is found.
+
+    The file read here is not the dhclient lease database (dhclient_<if>.leases)
+    but the per event dump written by
+    /etc/dhcp/dhclient-exit-hooks.d/03-vyos-dhclient-hook. It is intentionally
+    not removed when the DHCP client is stopped - the RELEASE/STOP event
+    rewrites it with an empty "new_routers", which is the signal that no router
+    is available. The file name is keyed on the interface only, a VRF assignment
+    does not change it.
     """
     lease_file = directories['isc_dhclient_dir'] + f'/dhclient_{interface}.lease'
     if not os.path.exists(lease_file):
@@ -486,8 +494,20 @@ def get_first_ike_dh_group(ike_group):
                 return 'dh-group' + proposal['dh_group']
     return 'dh-group2' # Fallback on dh-group2
 
-@register_filter('get_esp_ike_cipher')
-def get_esp_ike_cipher(group_config, ike_group=None):
+def _get_esp_ike_cipher(group_config, ike_group=None, esn=True):
+    """Render strongSwan proposal strings.
+
+    esn=True  : ESP/CHILD_SA proposals, where ESN transforms are meaningful
+    esn=False : IKE_SA proposals. ESN is a CHILD_SA transform (RFC 7296
+                section 3.3.2, Transform Type 5) and has no meaning in an
+                IKE_SA proposal. Emitting it there breaks interoperability
+                with implementations that reject the malformed payload
+                without replying at all (observed with Cisco FTD, T9254).
+
+    Not registered as a filter directly: callers must go through
+    get_esp_cipher() or get_ike_cipher() so esn can't be left at its
+    default where an IKE cipher is needed.
+    """
     pfs_lut = {
         'dh-group1'  : 'modp768',
         'dh-group2'  : 'modp1024',
@@ -534,10 +554,12 @@ def get_esp_ike_cipher(group_config, ike_group=None):
                     group = get_first_ike_dh_group(ike_group)
                 tmp += '-' + pfs_lut[group]
 
-            # For 'optional' and 'disabled' we need two values as
-            # proposal without '-esn'/'-noesn' is incompatible with
-            # proposals with any of them.
-            if 'esn' in proposal:
+            # ESP/CHILD_SA only. For 'optional' and 'disabled' we need two
+            # values as a proposal without '-esn'/'-noesn' is incompatible
+            # with proposals carrying any of them. This pairing is meaningless
+            # for an IKE_SA, which has no ESN transform at all - see the esn
+            # parameter above.
+            if esn and 'esn' in proposal:
                 if proposal['esn'] == 'required':
                     tmp += '-esn'
                 elif proposal['esn'] == 'optional':
@@ -547,6 +569,23 @@ def get_esp_ike_cipher(group_config, ike_group=None):
 
             ciphers.append(tmp)
     return ciphers
+
+
+@register_filter('get_esp_cipher')
+def get_esp_cipher(group_config, ike_group=None):
+    """ESP/CHILD_SA proposals, where ESN transforms are meaningful."""
+    return _get_esp_ike_cipher(group_config, ike_group=ike_group, esn=True)
+
+
+@register_filter('get_ike_cipher')
+def get_ike_cipher(group_config):
+    """IKE_SA proposals. ESN is a CHILD_SA transform (RFC 7296 section
+    3.3.2, Transform Type 5) and has no meaning in an IKE_SA proposal.
+    Emitting it there breaks interoperability with implementations that
+    reject the malformed payload without replying at all (observed with
+    Cisco FTD, T9254).
+    """
+    return _get_esp_ike_cipher(group_config, esn=False)
 
 @register_filter('get_uuid')
 def get_uuid(seed):

@@ -20,7 +20,6 @@ from base_vyostest_shim import VyOSUnitTestSHIM
 
 from vyos.configsession import ConfigSessionError
 from vyos.utils.file import read_file
-from vyos.utils.process import cmdl
 from vyos.utils.process import process_named_running
 from vyos.xml_ref import default_value
 
@@ -278,8 +277,7 @@ class TestSystemNTP(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         # Check for process in VRF
-        tmp = cmdl(['ip', 'vrf', 'pids', vrf_name])
-        self.assertIn(PROCESS_NAME, tmp)
+        self.verify_process_in_vrf(PROCESS_NAME, vrf_name)
 
         self.cli_delete(['vrf', 'name', vrf_name])
 
