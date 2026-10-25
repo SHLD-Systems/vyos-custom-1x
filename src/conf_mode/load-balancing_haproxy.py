@@ -81,7 +81,7 @@ def verify(lb):
                 if '%' in listen_address:
                     listen_address, *_ = listen_address.split('%', maxsplit=1)
 
-                if not is_addr_assigned(listen_address):
+                if not is_addr_assigned(listen_address, allow_nonlocal=True):
                     raise ConfigError(
                         f'listen-address "{listen_address}" not assigned on any interface!'
                     )
@@ -141,6 +141,18 @@ def verify(lb):
         if 'ssl' in back_config:
             if {'no_verify', 'ca_certificate'} <= set(back_config['ssl']):
                 raise ConfigError(f'backend {back} cannot have both ssl options no-verify and ca-certificate set!')
+
+            if 'checks_only' in back_config['ssl']:
+                if not {'no_verify', 'ca_certificate'} & set(back_config['ssl']):
+                    raise ConfigError(
+                        f'backend {back} ssl option checks-only requires no-verify or ca-certificate!'
+                    )
+                if not any(
+                    'check' in server for server in back_config['server'].values()
+                ):
+                    raise ConfigError(
+                        f'backend {back} ssl option checks-only requires at least one server with check enabled!'
+                    )
 
             tmp = dict_search('ssl.ca_certificate', back_config)
             if tmp: verify_pki_ca_certificate(lb, tmp)

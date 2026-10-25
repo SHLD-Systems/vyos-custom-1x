@@ -33,6 +33,32 @@ def sysctl_read(name: list[str]) -> str:
     tmp = run(['sysctl', '-nb', key], capture_output=True)
     return tmp.stdout.decode().strip()
 
+
+def sysctl_read_default(name: list[str]) -> str | None:
+    """Read the value the sysctl.d files set for a sysctl() option
+
+    systemd-analyze lists the files in the order systemd-sysctl applies them,
+    so the last assignment wins.
+
+    Args:
+        name (list[str]): sysctl key name components
+
+    Returns:
+        str | None: sysctl key value, None if no file sets it
+    """
+    key = _sysctl_key(name)
+    tmp = run(['systemd-analyze', 'cat-config', 'sysctl.d'], capture_output=True)
+    value = None
+    for line in tmp.stdout.decode().splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        tmp_key, sep, tmp_value = line.partition('=')
+        # a leading '-' only tells systemd-sysctl to ignore errors
+        if sep and tmp_key.strip().lstrip('-') == key:
+            value = tmp_value.strip()
+    return value
+
 def sysctl_write(name: list[str], value: str | int) -> bool:
     """Change value via sysctl()
 
@@ -157,3 +183,33 @@ def get_secure_boot_state() -> bool:
         return False
     tmp = cmdl(['mokutil', '--sb-state'], expect=[0, 255])
     return bool('enabled' in tmp)
+
+def get_secure_boot_certificates(kernel: str='/boot/vmlinuz') -> list:
+    """
+    Return the signature certificates of the given Linux Kernel image as a
+    list of dictionaries with the keys "issuer" and "subject". Returns an
+    empty list if the image is unsigned or the signature could not be read.
+    """
+    from vyos.utils.process import cmdl
+    try:
+        tmp = cmdl(['sbverify', '--list', kernel])
+    except OSError:
+        return []
+
+    certificates = []
+    subject = None
+    in_certificates = False
+    for line in tmp.splitlines():
+        line = line.strip()
+        if line.startswith('signature '):
+            in_certificates = False
+        elif line == 'image signature certificates:':
+            in_certificates = True
+        elif in_certificates and line.startswith('- subject:'):
+            subject = line.removeprefix('- subject:').strip()
+        elif in_certificates and line.startswith('issuer:') and subject:
+            issuer = line.removeprefix('issuer:').strip()
+            certificates.append({'issuer': issuer, 'subject': subject})
+            subject = None
+
+    return certificates

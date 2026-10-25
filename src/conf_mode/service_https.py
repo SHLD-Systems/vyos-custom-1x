@@ -19,7 +19,6 @@ import socket
 import sys
 import json
 
-from time import sleep
 
 from vyos.base import Warning
 from vyos.config import Config
@@ -30,6 +29,7 @@ from vyos.configverify import verify_pki_ca_certificate
 from vyos.configverify import verify_pki_dh_parameters
 from vyos.configdiff import get_config_diff
 from vyos.defaults import api_config_state
+from vyos.defaults import api_ready_state
 from vyos.pki import encode_certificate
 from vyos.pki import find_chain
 from vyos.pki import load_certificate
@@ -42,6 +42,7 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.utils.network import check_port_availability
 from vyos.utils.network import is_listen_port_bind_service
 from vyos.utils.file import write_file
+from vyos.utils.misc import wait_for
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -121,6 +122,15 @@ def verify(https):
         if dict_search('api.rest.authentication.oidc.issuer', https) is None:
             raise ConfigError('OIDC issuer must be configured when jwks-url is set')
 
+    if dict_search('api.rest.authentication.oidc.issuer', https) is not None:
+        if dict_search('api.rest.authentication.oidc.audience', https) is None:
+            raise ConfigError(
+                'OIDC audience must be configured when issuer is set. '
+                'Without it, any valid token issued by the trusted issuer '
+                'for a different application would be accepted, granting '
+                'full API privileges to an unrelated token holder.'
+            )
+
     # Check if server port is already in use by a different application
     listen_address = ['0.0.0.0']
     port = int(https['port'])
@@ -160,9 +170,18 @@ def verify(https):
         # If only key-based methods are enabled,
         # fail the commit if no valid key configurations are found
         mtls_auth = dict_search('certificates.verify_client', https) is not None
-        if (not valid_keys_exist) and (not jwt_auth) and (not mtls_auth):
+        oidc_auth = (
+            dict_search('api.rest.authentication.oidc.issuer', https) is not None
+        )
+        if (
+            (not valid_keys_exist)
+            and (not jwt_auth)
+            and (not mtls_auth)
+            and (not oidc_auth)
+        ):
             raise ConfigError(
-                'At least one HTTPS API key is required unless GraphQL token or mTLS authentication is enabled!'
+                'At least one HTTPS API key is required unless GraphQL token, '
+                'mTLS, or OIDC authentication is enabled!'
             )
 
         if (not valid_keys_exist) and jwt_auth:
@@ -170,6 +189,10 @@ def verify(https):
         if (not valid_keys_exist) and mtls_auth and not jwt_auth:
             Warning(
                 'API keys are not configured: only mTLS client certificate authentication will be available for the REST API!'
+            )
+        if (not valid_keys_exist) and oidc_auth and not jwt_auth and not mtls_auth:
+            Warning(
+                'API keys are not configured: only OIDC authentication will be available for the REST API!'
             )
 
     return None
@@ -270,9 +293,13 @@ def apply(https):
         return
 
     if 'api' in https:
+        # A reload is only signalled; the server restarts asynchronously and
+        # nginx answers 502 until it listens again. Wait for it.
+        if os.path.exists(api_ready_state):
+            os.unlink(api_ready_state)
         call(f'systemctl reload-or-restart {http_api_service_name}')
-        # Let uvicorn settle before (possibly) restarting nginx
-        sleep(1)
+        if not wait_for(os.path.exists, api_ready_state, interval=0.1, timeout=30):
+            Warning('HTTP API server did not become ready within 30 seconds')
     elif is_systemd_service_active(http_api_service_name):
         call(f'systemctl stop {http_api_service_name}')
 

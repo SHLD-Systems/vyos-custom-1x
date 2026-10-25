@@ -26,6 +26,7 @@ from vyos.configdict import is_node_changed
 from vyos.configdiff import Diff, get_config_diff
 from vyos.configdep import set_dependents, call_dependents
 from vyos.configverify import verify_interface_exists
+from vyos.defaults import nft_time_refresh
 from vyos.ethtool import Ethtool
 from vyos.firewall import fqdn_config_parse
 from vyos.geoip import geoip_refresh, geoip_update
@@ -86,15 +87,15 @@ def geoip_sets(firewall):
 
     for _, path in dict_search_recursive(firewall, 'country_code'):
         if (path[0] == 'ipv4'):
-            out['name'].append(f'GEOIP_CC_{path[1]}_{path[2]}_{path[4]}')
+            out['name'].append(f'GEOIP_CC_{path[1]}_{path[2]}_{path[4]}_{path[5][0]}')
         elif (path[0] == 'ipv6'):
-            out['ipv6_name'].append(f'GEOIP_CC6_{path[1]}_{path[2]}_{path[4]}')
+            out['ipv6_name'].append(f'GEOIP_CC6_{path[1]}_{path[2]}_{path[4]}_{path[5][0]}')
 
     for _, path in dict_search_recursive(firewall, 'asn'):
         if (path[0] == 'ipv4'):
-            out['name'].append(f'GEOIP_ASN_{path[1]}_{path[2]}_{path[4]}')
+            out['name'].append(f'GEOIP_ASN_{path[1]}_{path[2]}_{path[4]}_{path[5][0]}')
         elif (path[0] == 'ipv6'):
-            out['ipv6_name'].append(f'GEOIP_ASN6_{path[1]}_{path[2]}_{path[4]}')
+            out['ipv6_name'].append(f'GEOIP_ASN6_{path[1]}_{path[2]}_{path[4]}_{path[5][0]}')
 
     return out
 
@@ -149,9 +150,6 @@ def get_config(config=None):
         get_first_key=True, no_tag_node_value_mangle=True)
 
     fqdn_config_parse(firewall, 'firewall')
-
-    if not os.path.exists(nftables_conf):
-        firewall['first_install'] = True
 
     if 'zone' in firewall:
         for local_zone, local_zone_conf in firewall['zone'].items():
@@ -216,33 +214,37 @@ def verify_jump_target(firewall, hook, jump_target, family, recursive=False):
 
 def is_node_empty(rule_conf):
     is_empty_list = []
-    is_empty_list.append([
-                        ['add_address_to_group'],
-                        ['connection_status'],
-                        ['destination'],
-                        ['destination', 'group'],
-                        ['destination', 'geoip'],
-                        ['fragment'],
-                        ['gre'],
-                        ['gre', 'flags'],
-                        ['hop_limit'],
-                        ['icmp'],
-                        ['icmpv6'],
-                        ['inbound_interface'],
-                        ['ipsec'],
-                        ['limit'],
-                        ['log_options'],
-                        ['outbound_interface'],
-                        ['set'],
-                        ['source'],
-                        ['source', 'group'],
-                        ['source', 'geoip'],
-                        ['tcp'],
-                        ['tcp', 'flags'],
-                        ['time'],
-                        ['ttl'],
-                        ['vlan']
-                        ])
+    is_empty_list.append(
+        [
+            ['add_address_to_group'],
+            ['connection_status'],
+            ['destination'],
+            ['destination', 'group'],
+            ['destination', 'geoip'],
+            ['fib'],
+            ['fib', 'match'],
+            ['fragment'],
+            ['gre'],
+            ['gre', 'flags'],
+            ['hop_limit'],
+            ['icmp'],
+            ['icmpv6'],
+            ['inbound_interface'],
+            ['ipsec'],
+            ['limit'],
+            ['log_options'],
+            ['outbound_interface'],
+            ['set'],
+            ['source'],
+            ['source', 'group'],
+            ['source', 'geoip'],
+            ['tcp'],
+            ['tcp', 'flags'],
+            ['time'],
+            ['ttl'],
+            ['vlan'],
+        ]
+    )
 
     for node in is_empty_list[0]:
         if dict_search_args(rule_conf, *node) == {}:
@@ -330,6 +332,16 @@ def verify_rule(firewall, family, hook, priority, rule_id, rule_conf):
     if 'fragment' in rule_conf:
         if {'match_frag', 'match_non_frag'} <= set(rule_conf['fragment']):
             raise ConfigError(f'{rule_num}Cannot specify both "match-frag" and "match-non-frag"')
+
+    if 'fib' in rule_conf:
+        if 'lookup' not in rule_conf['fib']:
+            raise ConfigError(f'{rule_num}fib lookup must be defined')
+        if {'source-address', 'destination-address'} <= set(rule_conf['fib']['lookup']):
+            raise ConfigError(
+                f'{rule_num}fib lookup cannot specify both "source-address" and "destination-address"'
+            )
+        if 'match' not in rule_conf['fib']:
+            raise ConfigError(f'{rule_num}fib match must be defined')
 
     node_empty, node_name = is_node_empty(rule_conf)
     if node_empty:
@@ -772,12 +784,15 @@ def apply(firewall):
     # Apply firewall global-options sysctl settings
     cmdl(['sysctl', '-f', sysctl_file])
 
+    # hour matches were converted to UTC with the current offset
+    call(f'{nft_time_refresh} --arm')
+
     call_dependents()
 
     ## DOMAIN RESOLVER
     domain_action = 'restart'
     if dict_search_args(firewall, 'group', 'remote_group') or dict_search_args(firewall, 'group', 'domain_group') or firewall['ip_fqdn'].items() or firewall['ip6_fqdn'].items():
-        text = f'# Automatically generated by firewall.py\nThis file indicates that vyos-domain-resolver service is used by the firewall.\n'
+        text = '# Automatically generated by firewall.py\nThis file indicates that vyos-domain-resolver service is used by the firewall.\n'
         write_file(domain_resolver_usage, text)
     else:
         if os.path.exists(domain_resolver_usage):

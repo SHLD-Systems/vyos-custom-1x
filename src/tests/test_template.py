@@ -184,11 +184,11 @@ class TestVyOSTemplate(TestCase):
         }
 
         for group_name, group_config in data['esp_group'].items():
-            ciphers = vyos.template.get_esp_ike_cipher(group_config)
+            ciphers = vyos.template.get_esp_cipher(group_config)
             self.assertIn(ESP_DEFAULT, ','.join(ciphers))
 
         for group_name, group_config in data['ike_group'].items():
-            ciphers = vyos.template.get_esp_ike_cipher(group_config)
+            ciphers = vyos.template.get_ike_cipher(group_config)
             self.assertIn(IKEv2_DEFAULT, ','.join(ciphers))
 
     def test_get_default_port(self):
@@ -208,3 +208,15 @@ class TestVyOSTemplate(TestCase):
                          internal_ports['certbot_haproxy'])
         self.assertEqual(vyos.template.nft_accept_invalid('arp'),
                          'ct state invalid ether type arp counter accept')
+
+    def test_openvpn_ciphers(self):
+        # CLI values map onto the names OpenVPN expects
+        self.assertEqual(
+            vyos.template.get_openvpn_data_ciphers(['chacha20poly1305', 'aes256gcm']),
+            'CHACHA20-POLY1305:AES-256-GCM',
+        )
+        self.assertEqual(
+            vyos.template.get_openvpn_data_ciphers_fallback('chacha20poly1305'),
+            'CHACHA20-POLY1305',
+        )
+        self.assertEqual(vyos.template.get_openvpn_cipher('aes128'), 'AES-128-CBC')

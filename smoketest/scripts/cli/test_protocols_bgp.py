@@ -14,9 +14,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import re
 import unittest
-
-from time import sleep
 
 from base_vyostest_shim import VyOSUnitTestSHIM
 
@@ -25,6 +24,7 @@ from vyos.configsession import ConfigSessionError
 from vyos.template import is_ipv6
 from vyos.utils.process import process_named_running
 from vyos.utils.process import cmdl
+from vyos.utils.process import rc_cmd
 from vyos.utils.file import read_file
 from vyos.frrender import bgp_daemon
 
@@ -33,10 +33,10 @@ base_path = ['protocols', 'bgp']
 
 route_map_in = 'foo-map-in'
 route_map_out = 'foo-map-out'
-prefix_list_in = 'pfx-foo-in'
+prefix_list_in = 'pfx.foo-in'
 prefix_list_out = 'pfx-foo-out'
 prefix_list_in6 = 'pfx-foo-in6'
-prefix_list_out6 = 'pfx-foo-out6'
+prefix_list_out6 = 'pfx.foo-out6'
 bfd_profile = 'foo-bar-baz'
 
 import_afi = 'ipv4-unicast'
@@ -49,6 +49,7 @@ neighbor_config = {
         'cap_dynamic'      : '',
         'cap_ext_next'     : '',
         'cap_ext_sver'     : '',
+        'orf_send'         : '',
         'remote_as'        : '100',
         'adv_interv'       : '400',
         'passive'          : '',
@@ -70,6 +71,7 @@ neighbor_config = {
         'no_cap_nego'      : '',
         'port'             : '667',
         'cap_strict'       : '',
+        'orf_receive'      : '',
         'advertise_map'    : route_map_in,
         'non_exist_map'    : route_map_out,
         'pfx_list_in'      : prefix_list_in,
@@ -94,6 +96,8 @@ neighbor_config = {
         'cap_dynamic'      : '',
         'cap_ext_next'     : '',
         'cap_ext_sver'     : '',
+        'orf_send'         : '',
+        'orf_receive'      : '',
         'remote_as'        : '123',
         'adv_interv'       : '400',
         'passive'          : '',
@@ -142,6 +146,7 @@ peer_group_config = {
         'p_attr_discard'   : ['100', '150', '200'],
         },
     'bar' : {
+        'orf_send'         : '',
         'remote_as'        : 'auto',
         'graceful_rst_no'  : '',
         'port'             : '667',
@@ -150,6 +155,7 @@ peer_group_config = {
     'foo-bar' : {
         'advertise_map'    : route_map_in,
         'description'      : 'foo peer bar group',
+        'orf_receive'      : '',
         'remote_as'        : '200',
         'shutdown'         : '',
         'no_cap_nego'      : '',
@@ -164,6 +170,8 @@ peer_group_config = {
         'bfd_profile'      : bfd_profile,
         'cap_dynamic'      : '',
         'cap_ext_next'     : '',
+        'orf_send'         : '',
+        'orf_receive'      : '',
         'remote_as'        : '200',
         'passive'          : '',
         'multi_hop'        : '5',
@@ -249,6 +257,18 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
             self.assertIn(f' neighbor {peer} capability extended-nexthop', frrconfig)
         if 'cap_ext_sver' in peer_config:
             self.assertIn(f' neighbor {peer} capability software-version', frrconfig)
+        # FRR collapses an enabled send and receive ORF capability into a
+        # single "both" statement - the template must do the very same
+        if 'orf_send' in peer_config and 'orf_receive' in peer_config:
+            self.assertIn(f' neighbor {peer} capability orf prefix-list both', frrconfig)
+            self.assertNotIn(f' neighbor {peer} capability orf prefix-list send', frrconfig)
+            self.assertNotIn(f' neighbor {peer} capability orf prefix-list receive', frrconfig)
+        elif 'orf_send' in peer_config:
+            self.assertIn(f' neighbor {peer} capability orf prefix-list send', frrconfig)
+            self.assertNotIn(f' neighbor {peer} capability orf prefix-list both', frrconfig)
+        elif 'orf_receive' in peer_config:
+            self.assertIn(f' neighbor {peer} capability orf prefix-list receive', frrconfig)
+            self.assertNotIn(f' neighbor {peer} capability orf prefix-list both', frrconfig)
         if 'description' in peer_config:
             self.assertIn(f' neighbor {peer} description {peer_config["description"]}', frrconfig)
         if 'no_cap_nego' in peer_config:
@@ -475,6 +495,10 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
                 self.cli_set(base_path + ['neighbor', peer, 'capability', 'extended-nexthop'])
             if 'cap_ext_sver' in peer_config:
                 self.cli_set(base_path + ['neighbor', peer, 'capability', 'software-version'])
+            if 'orf_send' in peer_config:
+                self.cli_set(base_path + ['neighbor', peer, 'address-family', afi, 'capability', 'orf', 'prefix-list', 'send'])
+            if 'orf_receive' in peer_config:
+                self.cli_set(base_path + ['neighbor', peer, 'address-family', afi, 'capability', 'orf', 'prefix-list', 'receive'])
             if 'description' in peer_config:
                 self.cli_set(base_path + ['neighbor', peer, 'description', peer_config["description"]])
             if 'no_cap_nego' in peer_config:
@@ -580,6 +604,10 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
                 self.cli_set(base_path + ['peer-group', peer_group, 'capability', 'extended-nexthop'])
             if 'cap_ext_sver' in config:
                 self.cli_set(base_path + ['peer-group', peer_group, 'capability', 'software-version'])
+            if 'orf_send' in config:
+                self.cli_set(base_path + ['peer-group', peer_group, 'address-family', 'ipv4-unicast', 'capability', 'orf', 'prefix-list', 'send'])
+            if 'orf_receive' in config:
+                self.cli_set(base_path + ['peer-group', peer_group, 'address-family', 'ipv4-unicast', 'capability', 'orf', 'prefix-list', 'receive'])
             if 'description' in config:
                 self.cli_set(base_path + ['peer-group', peer_group, 'description', config["description"]])
             if 'no_cap_nego' in config:
@@ -1612,7 +1640,6 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         int_neighbors = ['192.0.2.2', '192.0.2.3', '192.0.2.4', '192.0.2.5']
         int_interfaces = ['dum0', 'dum1', 'dum2', 'dum3']
         int_pg_names = ['SMOKETESTINT0', 'SMOKETESTINT1', 'SMOKETESTINT2']
-        remote_as_types = ['external', 'internal']
         for int_interface in int_interfaces:
             self.cli_set(['interfaces', 'dummy', int_interface])
         self.cli_commit()
@@ -1645,16 +1672,19 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
             self.cli_set(base_path + ['neighbor', neighbor] + interface_cmd + ['remote-as', remote_as_type])
 
         set_neighbor_funcs = [_set_neighbor_0, _set_neighbor_1, _set_neighbor_2, _set_neighbor_3]
-        for remote_as_type in remote_as_types:
-            for func_count, set_neighbor_func in enumerate(set_neighbor_funcs):
-                for neighbors in [int_neighbors, int_interfaces]:
-                    set_neighbor_func(neighbors[func_count], remote_as_type)
-                    if remote_as_type == 'external':
-                        with self.assertRaises(ConfigSessionError) as e:
-                            self.cli_commit()
-                        self.cli_discard()
-                    else:
-                        self.cli_commit()
+        # route-reflector-client is only valid for iBGP - every eBGP variant
+        # must be rejected on its own
+        for func_count, set_neighbor_func in enumerate(set_neighbor_funcs):
+            for neighbors in [int_neighbors, int_interfaces]:
+                set_neighbor_func(neighbors[func_count], 'external')
+                with self.assertRaises(ConfigSessionError) as e:
+                    self.cli_commit()
+                self.cli_discard()
+
+        for func_count, set_neighbor_func in enumerate(set_neighbor_funcs):
+            for neighbors in [int_neighbors, int_interfaces]:
+                set_neighbor_func(neighbors[func_count], 'internal')
+        self.cli_commit()
 
         frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit', start_subsection=' address-family ipv4 unicast', stop_subsection='^ exit-address-family')
         neighbor_has_rr_client = [
@@ -1777,6 +1807,12 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         self.cli_set(
             base_path + ['address-family', 'ipv4-unicast', 'route-map',
                          'vrf', 'import',  route_map_in])
+        self.cli_set(
+            base_path + ['address-family', 'ipv6-unicast', 'import',
+                         'vrf', vrf])
+        self.cli_set(
+            base_path + ['address-family', 'ipv6-unicast', 'route-map',
+                         'vrf', 'import',  route_map_in])
 
         self.cli_commit()
 
@@ -1789,12 +1825,65 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         self.assertIn(f'  import vrf {vrf}', frrconfig)
         self.assertIn(f'  import vrf route-map {route_map_in}', frrconfig)
 
+        # The same filter under IPv6 unicast
+        frr_ipv6 = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit',
+                                     start_subsection=' address-family ipv6 unicast',
+                                     stop_subsection='^ exit-address-family')
+        self.assertIn(f'  import vrf {vrf}', frr_ipv6)
+        self.assertIn(f'  import vrf route-map {route_map_in}', frr_ipv6)
+
         # Verify FRR bgpd configuration
         frr_vrf_config = self.getFRRconfig(
             f'router bgp {ASN} vrf {vrf}', stop_section='^exit')
         self.assertIn(f'router bgp {ASN} vrf {vrf}', frr_vrf_config)
         self.assertIn(f' bgp router-id {router_id}', frr_vrf_config)
 
+        # T9394: route-map is still referenced by "route-map vrf import"
+        self.cli_delete(['policy', 'route-map', route_map_in])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
+
+    def test_bgp_30_import_vrf_routemap_vrf_only(self):
+        # T9394: BGP only inside VRFs, no BGP instance in the default VRF
+        vrf = 'red'
+        vrf_import = 'blue'
+        vrf_base = ['vrf', 'name', vrf]
+        vrf_bgp_path = vrf_base + base_path
+
+        self.cli_delete(base_path)
+        self.cli_set(['vrf', 'name', vrf_import, 'table', '2000'])
+        self.cli_set(vrf_base + ['table', '1000'])
+        self.cli_set(vrf_bgp_path + ['system-as', ASN])
+        self.cli_set(vrf_bgp_path + ['address-family', 'ipv4-unicast', 'import',
+                                     'vrf', vrf_import])
+        self.cli_set(vrf_bgp_path + ['address-family', 'ipv4-unicast', 'route-map',
+                                     'vrf', 'import', route_map_in])
+        self.cli_set(vrf_bgp_path + ['neighbor', '192.0.2.1', 'remote-as', 'external'])
+        self.cli_set(vrf_bgp_path + ['neighbor', '192.0.2.1', 'address-family',
+                                     'ipv4-unicast', 'route-map', 'export', route_map_out])
+        self.cli_commit()
+
+        frrconfig = self.getFRRconfig(f'router bgp {ASN} vrf {vrf}', stop_section='^exit')
+        self.assertIn(f'  import vrf route-map {route_map_in}', frrconfig)
+        self.assertIn(f'  neighbor 192.0.2.1 route-map {route_map_out} out', frrconfig)
+
+        for route_map in [route_map_in, route_map_out]:
+            self.cli_delete(['policy', 'route-map', route_map])
+            with self.assertRaises(ConfigSessionError):
+                self.cli_commit()
+            self.cli_discard()
+
+        # Deleting the VRF and the route-map in one commit is fine
+        self.cli_delete(vrf_base)
+        self.cli_delete(['policy', 'route-map', route_map_in])
+        self.cli_delete(['policy', 'route-map', route_map_out])
+        self.cli_commit()
+
+        # Restore route-maps from setUpClass for subsequent tests
+        self.cli_set(['policy', 'route-map', route_map_in, 'rule', '10', 'action', 'permit'])
+        self.cli_set(['policy', 'route-map', route_map_out, 'rule', '10', 'action', 'permit'])
+        self.cli_commit()
 
     def test_bgp_31_as_notation(self):
         # Test BGP AS-notation output format for both global and VRF BGP instances.
@@ -1802,21 +1891,20 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         router_id = '127.0.0.4'
         vrf = 'red'
 
-        for vrf in ['', 'red']:
-            vrf_base = ['vrf', 'name', vrf] if vrf else []
-            vrf_frr_bit = f' vrf {vrf}' if vrf else ''
-            bgp_path = vrf_base + base_path
+        vrf_frr_bits = ['', f' vrf {vrf}']
+        bgp_paths = [base_path, ['vrf', 'name', vrf] + base_path]
 
-            if vrf_base:
-                self.cli_set(vrf_base + ['table', '2000'])
-
+        self.cli_set(['vrf', 'name', vrf, 'table', '2000'])
+        for bgp_path in bgp_paths:
             self.cli_set(bgp_path + ['system-as', ASN])
             self.cli_set(bgp_path + ['parameters', 'router-id', router_id])
 
-            for notation in ['asdot', 'asdot+']:
+        for notation in ['asdot', 'asdot+']:
+            for bgp_path in bgp_paths:
                 self.cli_set(bgp_path + ['parameters', 'as-notation', notation])
-                self.cli_commit()
+            self.cli_commit()
 
+            for vrf_frr_bit in vrf_frr_bits:
                 # our config options are called 'asdot' and 'asdot+' as in
                 # RFC 5396
                 # but FRR calls them 'dot' and 'dot+' in the router bgp line
@@ -1830,22 +1918,16 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
                 )
                 self.assertIn(router_str, frrconfig)
 
-            # Verify removing as-notation works
+        # Verify removing as-notation works
+        for bgp_path in bgp_paths:
             self.cli_delete(bgp_path + ['parameters', 'as-notation'])
-            self.cli_commit()
+        self.cli_commit()
 
+        for vrf_frr_bit in vrf_frr_bits:
             router_str = f'router bgp {ASN}{vrf_frr_bit}'
-
             frrconfig = self.getFRRconfig(router_str, stop_section='^exit')
             self.assertIn(router_str, frrconfig)
             self.assertNotIn('as-notation', frrconfig.splitlines()[0])
-
-            # Cleanup
-            self.cli_delete(bgp_path)
-            if vrf_base:
-                self.cli_delete(vrf_base)
-
-            self.cli_commit()
 
     def test_bgp_32_bfd_strict(self):
         neighbor = '192.0.2.22'
@@ -1978,11 +2060,21 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         # restart bgpd to apply "-M bmp" and update PID
-        cmdl(['kill', '-9', str(self.daemon_pid)], sudo=True)
-        # let the bgpd process recover
-        sleep(10)
+        old_pid = self.daemon_pid
+        cmdl(['kill', '-9', str(old_pid)], sudo=True)
+        # bgpd is only settled once watchfrr has finished restarting it - an
+        # early PID may still be replaced
+        def bgpd_settled(out):
+            return (process_named_running(bgp_daemon, 'bmp') not in (None, old_pid) and
+                    'global phase: Idle' in out and
+                    'Reading Configuration: no' in out and
+                    re.search(rf'^\s+{bgp_daemon}\s+Up$', out, re.M))
+        # timeout follows watchfrr "Restart Timeout"
+        settled, _ = self.wait_for_result(lambda: rc_cmd('vtysh -c "show watchfrr"')[1],
+                                          bgpd_settled, pause=0.5, timeout=90)
+        self.assertTrue(settled)
         # update daemon PID - this was a planned daemon restart
-        self.daemon_pid = process_named_running(bgp_daemon)
+        self.daemon_pid = process_named_running(bgp_daemon, 'bmp')
 
         # set bmp config but not set address
         self.cli_set(target_path + ['port', target_port])
@@ -2080,6 +2172,367 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
         self.assertIn(f' neighbor {peer_group} prefix-list {broken_prefix_list} out', frrconfig)
 
         self.cli_delete(['policy', 'prefix-list', broken_prefix_list])
+
+    def test_bgp_106_interface_l3vpn_multi_domain_switching(self):
+        interfaces = Section.interfaces('ethernet', vlan=False)
+        for interface in interfaces:
+            self.cli_set(
+                base_path
+                + ['interface', interface, 'mpls', 'l3vpn-multi-domain-switching']
+            )
+
+        self.cli_commit()
+
+        for interface in interfaces:
+            frrconfig = self.getFRRconfig(
+                f'interface {interface}', stop_section='^exit'
+            )
+            self.assertIn(f'interface {interface}', frrconfig)
+            self.assertIn(f' mpls bgp l3vpn-multi-domain-switching', frrconfig)
+
+    def test_bgp_107_default_local_pref_default_value(self):
+        # T9404: FRR does not print "bgp default local-preference 100" in its
+        # running config because 100 is the default. If we render the line
+        # anyway, frr-reload finds it missing on every reload and sends it
+        # again, and FRR runs "clear bgp * soft in" for each of those. So the
+        # default value must not be rendered.
+        #
+        # This reads the generated FRR config file instead of getFRRconfig():
+        # FRR never prints the line for 100, so vtysh cannot tell if we render it.
+        frr_conf = '/run/frr/config/vyos.frr.conf'
+        local_pref = ' bgp default local-preference'
+
+        # the XML default (100) is always in the config dict, but it is the
+        # default, so nothing is rendered when local-pref is not configured
+        self.cli_commit()
+        frrconfig = read_file(frr_conf)
+        self.assertIn(f'router bgp {ASN}', frrconfig)
+        self.assertNotIn(local_pref, frrconfig)
+
+        self.cli_set(base_path + ['parameters', 'default', 'local-pref', '100'])
+        self.cli_commit()
+
+        frrconfig = read_file(frr_conf)
+        self.assertIn(f'router bgp {ASN}', frrconfig)
+        self.assertNotIn(local_pref, frrconfig)
+
+        # a value other than the default is still rendered and applied
+        self.cli_set(base_path + ['parameters', 'default', 'local-pref', '200'])
+        self.cli_commit()
+
+        self.assertIn(f'{local_pref} 200', read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertIn(f'{local_pref} 200', frrconfig)
+
+        # back to the default value, FRR must have the default again
+        self.cli_set(base_path + ['parameters', 'default', 'local-pref', '100'])
+        self.cli_commit()
+
+        self.assertNotIn(local_pref, read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertNotIn(local_pref, frrconfig)
+
+        # the VRF instance has the same default: 100 is not rendered in the
+        # VRF block, 200 is rendered in the VRF block only
+        vrf_header = f'router bgp {ASN} vrf {import_vrf}'
+        vrf_local_pref = import_vrf_base + [import_vrf, 'protocols', 'bgp', 'parameters', 'default', 'local-pref']
+        self.create_bgp_instances_for_import_test()
+        self.cli_set(vrf_local_pref + ['100'])
+        self.cli_commit()
+
+        frrconfig = read_file(frr_conf)
+        self.assertIn(vrf_header, frrconfig)
+        self.assertNotIn(local_pref, frrconfig)
+
+        self.cli_set(vrf_local_pref + ['200'])
+        self.cli_commit()
+
+        # the global block comes first in the file, the VRF block after it
+        global_block, _, vrf_block = read_file(frr_conf).partition(vrf_header)
+        self.assertIn(f'router bgp {ASN}', global_block)
+        self.assertNotIn(local_pref, global_block)
+        self.assertIn(f'{local_pref} 200', vrf_block)
+        frrconfig = self.getFRRconfig(vrf_header, stop_section='^exit')
+        self.assertIn(f'{local_pref} 200', frrconfig)
+
+    def test_bgp_108_reject_as_sets_default_value(self):
+        # FRR 10.5+ defaults to "bgp reject-as-sets" and does not print the
+        # default in its running config. If we render the line anyway,
+        # frr-reload finds it missing on every reload and sends it again, and
+        # FRR resets every BGP session for each of those. So only the
+        # non-default form ("no bgp reject-as-sets") must be rendered.
+        #
+        # This reads the generated FRR config file besides getFRRconfig():
+        # FRR never prints the default form, so vtysh cannot tell if we render it.
+        frr_conf = '/run/frr/config/vyos.frr.conf'
+        reject = ' bgp reject-as-sets'
+        no_reject = ' no bgp reject-as-sets'
+
+        # not set: the non-default form is rendered and FRR has it
+        self.cli_commit()
+        self.assertIn(no_reject, read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertIn(no_reject, frrconfig)
+
+        # set: this is the FRR default, nothing is rendered and FRR has the
+        # default again (the "no" line is gone from its running config)
+        self.cli_set(base_path + ['parameters', 'reject-as-sets'])
+        self.cli_commit()
+        frrconfig = read_file(frr_conf)
+        self.assertIn(f'router bgp {ASN}', frrconfig)
+        self.assertNotIn(reject, frrconfig)
+        self.assertNotIn(no_reject, frrconfig)
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertNotIn(reject, frrconfig)
+
+        # deleted again: FRR must go back to "no bgp reject-as-sets"
+        self.cli_delete(base_path + ['parameters', 'reject-as-sets'])
+        self.cli_commit()
+        self.assertIn(no_reject, read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertIn(no_reject, frrconfig)
+
+        # the VRF instance renders the same way: set only in the VRF instance,
+        # the global block keeps its "no" line and the VRF block has none
+        vrf_header = f'router bgp {ASN} vrf {import_vrf}'
+        vrf_reject = import_vrf_base + [import_vrf, 'protocols', 'bgp', 'parameters', 'reject-as-sets']
+        self.create_bgp_instances_for_import_test()
+        self.cli_set(vrf_reject)
+        self.cli_commit()
+
+        global_block, sep, vrf_block = read_file(frr_conf).partition(vrf_header)
+        # the VRF instance must be rendered, else the checks below prove nothing
+        self.assertEqual(sep, vrf_header)
+        self.assertIn(f'router bgp {ASN}', global_block)
+        self.assertIn(no_reject, global_block)
+        self.assertNotIn(reject, vrf_block)
+        self.assertNotIn(no_reject, vrf_block)
+        frrconfig = self.getFRRconfig(vrf_header, stop_section='^exit')
+        self.assertIn(vrf_header, frrconfig)
+        self.assertNotIn(no_reject, frrconfig)
+
+    def test_bgp_109_peer_group_member_activate_inherited(self):
+        # T9450: FRR (bgp_config_write_peer_af(), bgpd/bgp_vty.c) prints a
+        # peer-group member's own "neighbor X activate" only when the
+        # member's activation state for an AFI/SAFI differs from the
+        # group's. A member bound to a group that already has the same
+        # address-family is activated for it at bind time
+        # (peer_group_bind(), bgpd/bgpd.c), so re-sending the member's own
+        # "activate" every commit is both redundant and, at scale, one of
+        # the lines frr-reload re-applies on every reload.
+        peer_group = 'foo'
+        member = '192.0.2.1'
+        iface_member = 'eth0'
+
+        self.cli_set(base_path + ['peer-group', peer_group, 'remote-as', ASN])
+        self.cli_set(base_path + ['peer-group', peer_group, 'address-family', 'ipv4-unicast'])
+
+        self.cli_set(base_path + ['neighbor', member, 'peer-group', peer_group])
+        # same AFI as the group - the member-specific route-map proves the
+        # address-family block itself is still rendered
+        self.cli_set(base_path + ['neighbor', member, 'address-family', 'ipv4-unicast', 'route-map', 'import', route_map_in])
+        # an AFI the group does NOT have - the member must keep its own activate
+        self.cli_set(base_path + ['neighbor', member, 'address-family', 'ipv6-unicast'])
+
+        # an interface-based ("unnumbered") peer-group member behaves the same way
+        self.cli_set(base_path + ['neighbor', iface_member, 'interface', 'peer-group', peer_group])
+        # address-family is a direct child of "neighbor", not of "interface",
+        # even for an interface-based (unnumbered) member
+        self.cli_set(base_path + ['neighbor', iface_member, 'address-family', 'ipv4-unicast'])
+
+        self.cli_commit()
+
+        # This reads the generated FRR config file instead of getFRRconfig():
+        # FRR's own bgp_config_write_peer_af() always suppresses a member's
+        # "activate" from its OWN running-config print when the member's
+        # state matches its peer-group's, regardless of whether the rendered
+        # file keeps re-sending the redundant line every commit - so vtysh
+        # cannot tell if we render it.
+        frr_conf = '/run/frr/config/vyos.frr.conf'
+        rendered = read_file(frr_conf)
+        # scope the ipv4-unicast checks to that address-family's own block -
+        # 192.0.2.1 legitimately gets its own "activate" under ipv6-unicast
+        # (checked below), and a whole-text assertNotIn would wrongly catch that
+        ipv4_block, _, ipv6_and_rest = rendered.partition(' address-family ipv6 unicast')
+        # the group itself always activates
+        self.assertIn(f' neighbor {peer_group} activate', ipv4_block)
+        # the member's ipv4-unicast activation is inherited from the group:
+        # the rendered file must not re-send it, but the member's own per-AF
+        # option is still there
+        self.assertNotIn(f' neighbor {member} activate', ipv4_block)
+        self.assertIn(f' neighbor {member} route-map {route_map_in} in', ipv4_block)
+        # ipv6-unicast: the group has nothing there, the member keeps its own activate
+        self.assertIn(f' neighbor {member} activate', ipv6_and_rest)
+        # the interface-based member inherits the same way (it has no ipv6-unicast
+        # config, so the whole-text check is unambiguous)
+        self.assertNotIn(f' neighbor {iface_member} activate', rendered)
+
+        # FRR's own running config must also be exactly this - neither an
+        # explicit "activate" nor a "no activate" for the inherited member,
+        # since the member's own per-AF option proves the block is active
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertNotIn(f'no neighbor {member} activate', frrconfig)
+        self.assertNotIn(f'no neighbor {iface_member} activate', frrconfig)
+
+        # functional proof beyond the rendered text: FRR's own per-peer state
+        # (afc[afi][safi], independent of session reachability) must show the
+        # member active in both families regardless of which one it inherited
+        neigh = self.getFRRopmode(f'show bgp neighbors {member}', json=True)
+        self.assertIn('ipv4Unicast', neigh[member]['addressFamilyInfo'])
+        self.assertIn('ipv6Unicast', neigh[member]['addressFamilyInfo'])
+        iface_neigh = self.getFRRopmode(f'show bgp neighbors {iface_member}', json=True)
+        self.assertIn('ipv4Unicast', iface_neigh[iface_member]['addressFamilyInfo'])
+
+        # the group loses ipv4-unicast later: FRR deactivates the member
+        # (peer_deactivate(), bgpd.c) and the member must render its own
+        # activate again to catch up
+        self.cli_delete(base_path + ['peer-group', peer_group, 'address-family', 'ipv4-unicast'])
+        self.cli_commit()
+
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertNotIn(f' neighbor {peer_group} activate', frrconfig)
+        # scope to the ipv4-unicast sub-section: 192.0.2.1 is also active in
+        # ipv6-unicast, where the group has nothing, so FRR always prints its
+        # "activate" there regardless of the ipv4 state being checked here
+        frr_v4 = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit',
+                                   start_subsection=' address-family ipv4 unicast',
+                                   stop_subsection='^ exit-address-family')
+        self.assertIn(f' neighbor {member} activate', frr_v4)
+        self.assertIn(f' neighbor {member} route-map {route_map_in} in', frrconfig)
+        self.assertIn(f' neighbor {iface_member} activate', frrconfig)
+
+        neigh = self.getFRRopmode(f'show bgp neighbors {member}', json=True)
+        self.assertIn('ipv4Unicast', neigh[member]['addressFamilyInfo'])
+
+        # the group gains the address family back: the members' own activate
+        # is dropped again (frr-reload deletes each member's "activate" before
+        # it adds the group's - a one-time session reset per affected member
+        # at this commit, not a lasting functional loss), and FRR must still
+        # have each member active (inherited)
+        self.cli_set(base_path + ['peer-group', peer_group, 'address-family', 'ipv4-unicast'])
+        self.cli_commit()
+
+        rendered = read_file(frr_conf)
+        ipv4_block = rendered.partition(' address-family ipv6 unicast')[0]
+        self.assertNotIn(f' neighbor {member} activate', ipv4_block)
+        # whole-text check, not scoped to ipv4_block: eth0 has no ipv6-unicast
+        # stanza of its own, so the partition above would put its entire block
+        # (including this line, if rendered) past the first ipv6-unicast
+        # boundary introduced by 192.0.2.1 - scoping this assertion to
+        # ipv4_block would never see it either way
+        self.assertNotIn(f' neighbor {iface_member} activate', rendered)
+
+        neigh = self.getFRRopmode(f'show bgp neighbors {member}', json=True)
+        self.assertIn('ipv4Unicast', neigh[member]['addressFamilyInfo'])
+        iface_neigh = self.getFRRopmode(f'show bgp neighbors {iface_member}', json=True)
+        self.assertIn('ipv4Unicast', iface_neigh[iface_member]['addressFamilyInfo'])
+
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertIn(f' neighbor {member} route-map {route_map_in} in', frrconfig)
+        self.assertNotIn(f'no neighbor {member} activate', frrconfig)
+        self.assertNotIn(f'no neighbor {iface_member} activate', frrconfig)
+
+    def test_bgp_110_conditional_advertisement_timer_default_value(self):
+        # T9450: FRR does not print "bgp conditional-advertisement timer 60"
+        # in its running config because 60 is the default
+        # (DEFAULT_CONDITIONAL_ROUTES_POLL_TIME, bgpd/bgp_conditional_adv.h).
+        # If we render the line anyway, frr-reload finds it missing on every
+        # reload and sends it again on every commit.
+        #
+        # This reads the generated FRR config file instead of getFRRconfig():
+        # FRR never prints the line for 60, so vtysh cannot tell if we render it.
+        frr_conf = '/run/frr/config/vyos.frr.conf'
+        timer = ' bgp conditional-advertisement timer'
+
+        # the XML default (60) is always in the config dict, but it is the
+        # default, so nothing is rendered when the timer is not configured
+        self.cli_commit()
+        frrconfig = read_file(frr_conf)
+        self.assertIn(f'router bgp {ASN}', frrconfig)
+        self.assertNotIn(timer, frrconfig)
+
+        self.cli_set(base_path + ['parameters', 'conditional-advertisement', 'timer', '60'])
+        self.cli_commit()
+
+        frrconfig = read_file(frr_conf)
+        self.assertIn(f'router bgp {ASN}', frrconfig)
+        self.assertNotIn(timer, frrconfig)
+
+        # a value other than the default is still rendered and applied
+        self.cli_set(base_path + ['parameters', 'conditional-advertisement', 'timer', '90'])
+        self.cli_commit()
+
+        self.assertIn(f'{timer} 90', read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertIn(f'{timer} 90', frrconfig)
+
+        # back to the default value, FRR must have the default again
+        self.cli_set(base_path + ['parameters', 'conditional-advertisement', 'timer', '60'])
+        self.cli_commit()
+
+        self.assertNotIn(timer, read_file(frr_conf))
+        frrconfig = self.getFRRconfig(f'router bgp {ASN}', stop_section='^exit')
+        self.assertNotIn(timer, frrconfig)
+
+        # the VRF instance has the same default: 60 is not rendered in the
+        # VRF block, 90 is rendered in the VRF block only
+        vrf_header = f'router bgp {ASN} vrf {import_vrf}'
+        vrf_timer = import_vrf_base + [import_vrf, 'protocols', 'bgp', 'parameters', 'conditional-advertisement', 'timer']
+        self.create_bgp_instances_for_import_test()
+        self.cli_set(vrf_timer + ['60'])
+        self.cli_commit()
+
+        frrconfig = read_file(frr_conf)
+        self.assertIn(vrf_header, frrconfig)
+        self.assertNotIn(timer, frrconfig)
+
+        self.cli_set(vrf_timer + ['90'])
+        self.cli_commit()
+
+        # the global block comes first in the file, the VRF block after it
+        global_block, _, vrf_block = read_file(frr_conf).partition(vrf_header)
+        self.assertIn(f'router bgp {ASN}', global_block)
+        self.assertNotIn(timer, global_block)
+        self.assertIn(f'{timer} 90', vrf_block)
+        frrconfig = self.getFRRconfig(vrf_header, stop_section='^exit')
+        self.assertIn(f'{timer} 90', frrconfig)
+
+    def test_bgp_111_vrf_evpn_route_target_both(self):
+        # T9450: FRR never folds a VRF's l2vpn evpn route-targets back into
+        # "both" (bgp_config_write_evpn_info(), bgpd/bgp_evpn_vty.c): the
+        # import list and the export list are each printed independently of
+        # how they were configured - unlike the per-VNI "route-target both"
+        # context, which tools/frr-reload.py folds back into "both" with a
+        # dedicated special case that does not exist for this, VRF-wide,
+        # context. Rendering "route-target both" here makes frr-reload see
+        # it missing from the running config and delete+re-add both
+        # route-targets every reload.
+        both_rt = f'{ASN}:400'
+        extra_import_rt = f'{ASN}:401'
+
+        self.create_bgp_instances_for_import_test()
+        af_path = import_vrf_base + [import_vrf, 'protocols', 'bgp', 'address-family', 'l2vpn-evpn']
+        self.cli_set(af_path + ['route-target', 'both', both_rt])
+        # a separate "import" of a different RT must still be rendered and
+        # applied alongside the "both" pair
+        self.cli_set(af_path + ['route-target', 'import', extra_import_rt])
+        self.cli_commit()
+
+        vrf_header = f'router bgp {ASN} vrf {import_vrf}'
+        frr_conf = '/run/frr/config/vyos.frr.conf'
+        rendered = read_file(frr_conf)
+        # FRR never prints "route-target both" for this context - the
+        # rendered file must not either, or frr-reload will see a spurious
+        # diff on every reload
+        self.assertNotIn('route-target both', rendered)
+
+        frrconfig = self.getFRRconfig(vrf_header, stop_section='^exit')
+        self.assertIn(vrf_header, frrconfig)
+        self.assertNotIn('route-target both', frrconfig)
+        self.assertIn(f' route-target import {both_rt}', frrconfig)
+        self.assertIn(f' route-target export {both_rt}', frrconfig)
+        self.assertIn(f' route-target import {extra_import_rt}', frrconfig)
+        self.assertNotIn(f' route-target export {extra_import_rt}', frrconfig)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

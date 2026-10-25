@@ -21,8 +21,10 @@ frr-reload.py, if the configuration has no errors.
 Will fail early if the rendered configuration has any errors.
 """
 
+import fcntl
 import os
 
+from contextlib import contextmanager
 from copy import deepcopy
 from time import sleep
 
@@ -31,12 +33,10 @@ from vyos.config import config_dict_merge
 from vyos.configdict import get_dhcp_interfaces
 from vyos.configdict import get_pppoe_interfaces
 from vyos.defaults import frr_debug_enable
-from vyos.defaults import static_route_dhcp_interfaces_path
 from vyos.utils.dict import dict_search
 from vyos.utils.dict import dict_set_nested
 from vyos.utils.file import read_file
 from vyos.utils.file import write_file
-from vyos.utils.process import cmdl
 from vyos.utils.process import rc_cmd
 from vyos.template import get_dhcp_router
 from vyos.template import render_to_string
@@ -46,6 +46,21 @@ def debug(message):
     if not os.path.exists(frr_debug_enable):
         return
     print(message)
+
+frr_config_file: str = '/run/frr/config/vyos.frr.conf'
+# Configuration of the last successful reload, for consumers which have no
+# cached configuration of their own
+frr_applied_config_file: str = '/run/frr/config/vyos.frr.applied.conf'
+frr_render_lock_file: str = '/run/vyos-frr-render.lock'
+
+@contextmanager
+def frr_render_lock():
+    """Serialize everything which renders FRR. The rendered configuration is a
+    single file handed to frr-reload.py, so a second renderer would rewrite it
+    while FRR is being reloaded from it."""
+    with open(frr_render_lock_file, 'w') as lock_file:
+        fcntl.lockf(lock_file, fcntl.LOCK_EX)
+        yield
 
 ERROR_RELOAD_TEST: str = 'The system encountered an error while rendering the ' \
     'new routing daemon configuration. To ensure network stability and avoid ' \
@@ -105,6 +120,12 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
         # options which we need to update into the dictionary retrieved.
         default_values = conf.get_config_defaults(path, key_mangling=('-', '_'),
                                                   get_first_key=True, recursive=True)
+        # The XML default of metric-type (shared by default-information and
+        # redistribute) is added to the dict, the template cannot query it
+        # while rendering.
+        xml_default_metric_type = dict_search(
+            'default_information.originate.metric_type', default_values
+        )
 
         # We have to cleanup the default dict, as default values could enable features
         # which are not explicitly enabled on the CLI. Example: default-information
@@ -136,6 +157,7 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
                 del default_values['interface'][interface]['dead_interval']
 
         ospf = config_dict_merge(default_values, ospf)
+        ospf['xml_default_metric_type'] = xml_default_metric_type
         return ospf
 
     def dict_helper_ospfv3_defaults(ospfv3, path):
@@ -143,6 +165,11 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
         # options which we need to update into the dictionary retrieved.
         default_values = conf.get_config_defaults(path, key_mangling=('-', '_'),
                                                   get_first_key=True, recursive=True)
+        # The XML default of metric-type is added to the dict, the template
+        # cannot query it while rendering.
+        xml_default_metric_type = dict_search(
+            'default_information.originate.metric_type', default_values
+        )
 
         # We have to cleanup the default dict, as default values could enable features
         # which are not explicitly enabled on the CLI. Example: default-information
@@ -164,6 +191,7 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
 
         # merge in remaining default values
         ospfv3 = config_dict_merge(default_values, ospfv3)
+        ospfv3['xml_default_metric_type'] = xml_default_metric_type
         return ospfv3
 
     def dict_helper_pim_defaults(pim, path):
@@ -300,6 +328,19 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
                                    no_tag_node_value_mangle=True,
                                    with_recursive_defaults=True)
         bgp['dependent_vrfs'] = {}
+        # The XML default of "parameters default local-pref" is added to the
+        # dict, the template cannot query it while rendering. Only the node
+        # "parameters default" is asked for, not the whole BGP tree.
+        tmp = conf.get_config_defaults(bgp_cli_path + ['parameters', 'default'],
+                                       key_mangling=('-', '_'), get_first_key=True)
+        bgp['xml_default_local_pref'] = tmp.get('local_pref')
+        # Same pattern for "parameters conditional-advertisement timer".
+        tmp = conf.get_config_defaults(
+            bgp_cli_path + ['parameters', 'conditional-advertisement'],
+            key_mangling=('-', '_'),
+            get_first_key=True,
+        )
+        bgp['xml_default_conditional_advertisement_timer'] = tmp.get('timer')
         dict.update({'bgp' : bgp})
     elif conf.exists_effective(bgp_cli_path):
         dict.update({'bgp' : {'deleted' : '', 'dependent_vrfs' : {}}})
@@ -525,6 +566,14 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
                 # merge in remaining default values
                 vrf_config['protocols']['bgp'] = config_dict_merge(default_values,
                                                                    vrf_config['protocols']['bgp'])
+                vrf_config['protocols']['bgp']['xml_default_local_pref'] = dict_search(
+                    'parameters.default.local_pref', default_values)
+
+                vrf_config['protocols']['bgp'][
+                    'xml_default_conditional_advertisement_timer'
+                ] = dict_search(
+                    'parameters.conditional_advertisement.timer', default_values
+                )
 
                 # Add this BGP VRF instance as dependency into the default VRF
                 if 'bgp' in dict:
@@ -692,11 +741,57 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
 
     return dict
 
+def get_dhcp_route_interfaces(config_dict) -> set:
+    """Collect all interfaces whose static route configuration is derived from a
+    DHCP lease. Two CLI constructs end up reading the DHCP lease file via the
+    "get_dhcp_router" Jinja filter and thus depend on the current lease:
+
+    - "protocols static route <prefix> dhcp-interface <ifname>", either directly
+      or below "protocols static table <id>"
+    - the default route implied by "interfaces <type> <ifname> address dhcp"
+
+    Both variants exist in the default VRF as well as inside any named VRF.
+    """
+    interfaces = set()
+
+    def _add_from_routes(route_conf):
+        if not isinstance(route_conf, dict):
+            return
+        for prefix_options in route_conf.values():
+            interfaces.update(prefix_options.get('dhcp_interface', []))
+
+    def _add_from_static(static_conf):
+        if not isinstance(static_conf, dict):
+            return
+        _add_from_routes(static_conf.get('route'))
+        # Routes in a dedicated routing table use the same "dhcp-interface"
+        # node, thus they depend on the DHCP lease in the very same way
+        for table_config in static_conf.get('table', {}).values():
+            if isinstance(table_config, dict):
+                _add_from_routes(table_config.get('route'))
+        for ifname, if_config in static_conf.get('dhcp', {}).items():
+            # An interface explicitly opting out of the default route does not
+            # contribute a route, thus a lease change is irrelevant for it
+            if dict_search('dhcp_options.no_default_route', if_config) != None:
+                continue
+            interfaces.add(ifname)
+
+    if not isinstance(config_dict, dict):
+        return interfaces
+
+    _add_from_static(config_dict.get('static'))
+    for vrf_name in dict_search('vrf.name', config_dict) or {}:
+        _add_from_static(
+            dict_search(f'vrf.name.{vrf_name}.protocols.static', config_dict)
+        )
+
+    return interfaces
+
 class FRRender:
     cached_config_dict = {}
     cached_dhcp_gateways = {}
     def __init__(self):
-        self._frr_conf = '/run/frr/config/vyos.frr.conf'
+        self._frr_conf = frr_config_file
 
     def generate(self, config_dict) -> None:
         """
@@ -707,9 +802,14 @@ class FRRender:
             tmp = type(config_dict)
             raise ValueError(f'Config must be of type "dict" and not "{tmp}"!')
 
+        # T8465: the rendered configuration embeds the current DHCP gateway,
+        # which changes independently of the CLI configuration. The interface
+        # list must be derived from the configuration itself - the DHCP hook
+        # list on disk is only written by protocols_static.py, which does not
+        # run on an interface-only commit.
         dhcp_gateways = {
             interface: get_dhcp_router(interface)
-            for interface in read_file(static_route_dhcp_interfaces_path, '').split()
+            for interface in get_dhcp_route_interfaces(config_dict)
         }
 
         if (
@@ -879,5 +979,12 @@ class FRRender:
         if count >= count_max:
             raise ConfigError(emsg)
 
-        # T3217: Save FRR configuration to /run/frr/config/frr.conf
-        return cmdl(['/usr/bin/vtysh', '-n', '--writeconfig'])
+        write_file(frr_applied_config_file, read_file(self._frr_conf))
+
+        # frr-reload.py --reload has already saved the configuration to
+        # /etc/frr/frr.conf (bind-mounted from /run/frr/config/frr.conf): it
+        # does so whenever it is not run with --daemon. T3217 added a second
+        # save here when VyOS still reloaded one daemon at a time with
+        # --daemon. Repeating it asks every daemon for its configuration once
+        # more, and a bgpd busy with a policy walk then holds the commit until
+        # the walk ends.

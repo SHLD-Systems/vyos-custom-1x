@@ -124,13 +124,15 @@ linux-cp {
 {% endif %}
 }
 
-{% set netlink_rx_buffers = 268435456 %}
 linux-nl {
-    nl-rx-buffer-size {{ netlink_rx_buffers }}
+    nl-rx-buffer-size {{ netlink_rx_buffer_size }}
 }
 
 {% if resource_allocation.memory.stats is vyos_defined %}
 statseg {
+{%     if resource_allocation.memory.stats.per_node_counters is vyos_defined %}
+    per-node-counters on
+{%     endif %}
 {%     if resource_allocation.memory.stats.size is vyos_defined %}
     size {{ resource_allocation.memory.stats.size }}
 {%     endif %}
@@ -178,13 +180,16 @@ dpdk {
 {%     endif %}
 {% endfor %}
     uio-bind-force
+{% if no_multi_seg is vyos_defined %}
+    no-multi-seg
+{% endif %}
 }
 
 {% if ipsec_acceleration is vyos_defined %}
 linux-xfrm-nl {
      enable-route-mode-ipsec
      interface ipsec
-     nl-rx-buffer-size {{ netlink_rx_buffers }}
+     nl-rx-buffer-size {{ netlink_rx_buffer_size }}
 }
 {% endif %}
 

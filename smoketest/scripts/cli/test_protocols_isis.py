@@ -368,7 +368,7 @@ class TestProtocolsISIS(VyOSUnitTestSHIM.TestCase):
             self.assertIn(f' no isis mpls ldp-sync', tmp)
 
     def test_isis_09_lfa(self):
-        prefix_list = 'lfa-prefix-list-test-1'
+        prefix_list = 'lfa.prefix-list.test-1'
         prefix_list_address = '192.168.255.255/32'
         interface = 'lo'
 
@@ -462,6 +462,8 @@ class TestProtocolsISIS(VyOSUnitTestSHIM.TestCase):
         self.assertIn(f' net {net}', tmp)
         self.assertIn(f' segment-routing srv6', tmp)
         self.assertIn(f'  locator {locator}', tmp)
+        # SRv6 alone must not enable SR-MPLS
+        self.assertNotIn(' segment-routing on', tmp)
 
         # Commit for isis
         self.cli_commit()
@@ -530,6 +532,8 @@ class TestProtocolsISIS(VyOSUnitTestSHIM.TestCase):
         self.assertIn(' segment-routing srv6', tmp)
         self.assertIn(f'  locator {locator}', tmp)
         self.assertIn(f'  interface {dum_iface}', tmp)
+        # SRv6 alone must not enable SR-MPLS
+        self.assertNotIn(' segment-routing on', tmp)
 
         # Test node-msd configuration
         self.cli_set(srv6_base_path + ['node-msd', 'max-end-d', '40'])
@@ -544,6 +548,103 @@ class TestProtocolsISIS(VyOSUnitTestSHIM.TestCase):
         self.assertIn('   max-end-pop 50', tmp)
         self.assertIn('   max-h-encaps 60', tmp)
         self.assertIn('   max-segs-left 70', tmp)
+        self.assertNotIn(' segment-routing on', tmp)
+
+    def test_isis_15_distribute_link_state(self):
+        interface = 'lo'
+        te_address = '192.0.2.1'
+
+        # Set a basic IS-IS config
+        self.cli_set(base_path + ['net', net])
+        self.cli_set(base_path + ['interface', interface])
+        self.cli_set(base_path + ['distribute', 'link-state'])
+        self.cli_commit()
+
+        tmp = self.getFRRconfig(f'router isis {domain}', stop_section='^exit')
+        self.assertIn(f' net {net}', tmp)
+        self.assertIn(' distribute link-state', tmp)
+
+        # verify() - distribute link-state and traffic-engineering are mutually
+        # exclusive, see "must" statement of the distribute-link-state leaf in
+        # FRR yang/frr-isisd.yang
+        self.cli_set(base_path + ['traffic-engineering', 'enable'])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_delete(base_path + ['traffic-engineering', 'enable'])
+
+        # verify() - same applies to the traffic-engineering export node
+        self.cli_set(base_path + ['traffic-engineering', 'export'])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_delete(base_path + ['traffic-engineering', 'export'])
+
+        # verify() - FRR renders "mpls-te router-address" into the mpls-te
+        # presence container, thus any traffic-engineering node conflicts - even
+        # if traffic-engineering enable is not set
+        self.cli_set(base_path + ['traffic-engineering', 'address', te_address])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_delete(base_path + ['traffic-engineering', 'address', te_address])
+
+        # Commit the remaining changes - IS-IS must only distribute the
+        # link-state database, MPLS-TE must not be enabled
+        self.cli_commit()
+
+        tmp = self.getFRRconfig(f'router isis {domain}', stop_section='^exit')
+        self.assertIn(' distribute link-state', tmp)
+        self.assertNotIn(' mpls-te', tmp)
+
+        # Verify the opposite direction - traffic-engineering can be used once
+        # distribute link-state is removed again
+        self.cli_delete(base_path + ['distribute'])
+        self.cli_set(base_path + ['traffic-engineering', 'enable'])
+        self.cli_set(base_path + ['traffic-engineering', 'address', te_address])
+        self.cli_set(base_path + ['traffic-engineering', 'export'])
+        self.cli_commit()
+
+        tmp = self.getFRRconfig(f'router isis {domain}', stop_section='^exit')
+        self.assertNotIn(' distribute link-state', tmp)
+        self.assertIn(' mpls-te on', tmp)
+        self.assertIn(f' mpls-te router-address {te_address}', tmp)
+        self.assertIn(' mpls-te export', tmp)
+
+    def test_isis_16_segment_routing_srv6_and_mpls(self):
+        locator = 'TEST'
+        msd = '5'
+        sr_base = ['protocols', 'segment-routing']
+        self.cli_set(sr_base + ['srv6', 'locator', locator, 'prefix', '2001:db8::/64'])
+        self.cli_set(sr_base + ['interface', 'lo'])
+
+        # The dummy interface used to install SRv6 SIDs in the Linux data plane
+        dum_iface = 'dum6'
+        self.cli_set(['interfaces', 'dummy', dum_iface])
+
+        self.cli_set(base_path + ['net', net])
+        self.cli_set(base_path + ['interface', 'lo'])
+
+        # SRv6 and SR-MPLS side by side
+        sr_path = base_path + ['segment-routing']
+        self.cli_set(sr_path + ['srv6', 'locator', locator])
+        self.cli_set(sr_path + ['srv6', 'interface', dum_iface])
+        self.cli_set(sr_path + ['maximum-label-depth', msd])
+        self.cli_commit()
+
+        tmp = self.getFRRconfig(f'router isis {domain}', stop_section='^exit')
+        self.assertIn(' segment-routing on', tmp)
+        self.assertIn(f' segment-routing node-msd {msd}', tmp)
+        self.assertIn(' segment-routing srv6', tmp)
+        self.assertIn(f'  locator {locator}', tmp)
+        self.assertIn(f'  interface {dum_iface}', tmp)
+
+        # Removing the only SR-MPLS option must disable SR-MPLS again. Not
+        # global-block: FRR rejects the "no" form frr-reload.py derives for it
+        self.cli_delete(sr_path + ['maximum-label-depth'])
+        self.cli_commit()
+
+        tmp = self.getFRRconfig(f'router isis {domain}', stop_section='^exit')
+        self.assertNotIn(' segment-routing on', tmp)
+        self.assertNotIn(' segment-routing node-msd', tmp)
+        self.assertIn(' segment-routing srv6', tmp)
 
 
 if __name__ == '__main__':

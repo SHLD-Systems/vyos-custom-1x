@@ -14,17 +14,15 @@
 
 import re
 
-from socket import AF_INET
-from socket import AF_INET6
-from socket import getaddrinfo
-
 from vyos.template import is_ipv4
 from vyos.utils.dict import dict_search_args
 from vyos.utils.dict import dict_search_recursive
 from vyos.utils.process import cmdl
 from vyos.utils.network import get_vrf_tableid
+from vyos.defaults import fragment_mark_bit
 from vyos.defaults import rt_global_table
 from vyos.defaults import rt_global_vrf
+from vyos.defaults import user_mark_mask
 
 # Conntrack
 def conntrack_required(conf):
@@ -74,13 +72,6 @@ def fqdn_config_parse(config, node):
             suffix = path[3][0]
             set_name = f'{nat_direction}_{nat_rule}_{suffix}'
             config['ip_fqdn'][set_name] = domain
-
-def fqdn_resolve(fqdn, ipv6=False):
-    try:
-        res = getaddrinfo(fqdn, None, AF_INET6 if ipv6 else AF_INET)
-        return set(item[4][0] for item in res)
-    except OSError:
-        return None
 
 def find_nftables_rule(table, chain, rule_matches=[]):
     # Find rule in table/chain that matches all criteria and return the handle
@@ -165,6 +156,30 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
         ether_type = ether_type_mapping.get(ether_type, ether_type)
         output.append(f'ether type {operator} {ether_type}')
 
+    if 'fib' in rule_conf:
+        lookup = rule_conf['fib']['lookup']
+        lookup_list = []
+
+        if 'source-address' in lookup:
+            lookup_list.append('saddr')
+        if 'destination-address' in lookup:
+            lookup_list.append('daddr')
+
+        lookup_output = ' . '.join(lookup_list)
+
+        match_conf = rule_conf['fib']['match']
+        match_output = ''
+
+        if 'route_type' in match_conf:
+            route_type = match_conf['route_type']
+            operator = ''
+            if route_type[0] == '!':
+                operator = '!= '
+                route_type = route_type[1:]
+            match_output = f'type {operator}{route_type}'
+
+        output.append(f'fib {lookup_output} {match_output}')
+
     for side in ['destination', 'source']:
         if side in rule_conf:
             prefix = side[0]
@@ -235,7 +250,7 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
                 # for policy
                 if hook == 'route' or hook == 'route6':
                     hook_name = hook
-                output.append(f'{ip_name} {prefix}addr {operator} @GEOIP_{geoip_prefix}{def_suffix}_{hook_name}_{fw_name}_{rule_id}')
+                output.append(f'{ip_name} {prefix}addr {operator} @GEOIP_{geoip_prefix}{def_suffix}_{hook_name}_{fw_name}_{rule_id}_{prefix}')
 
             if 'mac_address' in side_conf:
                 suffix = side_conf['mac_address']
@@ -438,11 +453,11 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
 
     if 'fragment' in rule_conf:
         # Checking for fragmentation after priority -400 is not possible,
-        # so we use a priority -450 hook to set a mark
+        # a priority -450 hook sets bit 31 of the mark on fragments
         if 'match_frag' in rule_conf['fragment']:
-            output.append('meta mark 0xffff1')
+            output.append(f'meta mark & {fragment_mark_bit} == {fragment_mark_bit}')
         if 'match_non_frag' in rule_conf['fragment']:
-            output.append('meta mark != 0xffff1')
+            output.append(f'meta mark & {fragment_mark_bit} != {fragment_mark_bit}')
 
     if 'limit' in rule_conf:
         if 'rate' in rule_conf['limit']:
@@ -512,7 +527,7 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
         if mark[0] == '!':
             operator = '!='
             mark = mark[1:]
-        output.append(f'meta mark {operator} {{{mark}}}')
+        output.append(f'meta mark & {user_mark_mask} {operator} {{{mark}}}')
 
     if 'vlan' in rule_conf:
         if 'id' in rule_conf['vlan']:
@@ -584,7 +599,7 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
             output.append(f'ip{def_suffix} dscp set {dscp}')
         if 'mark' in rule_conf['set']:
             mark = rule_conf['set']['mark']
-            output.append(f'meta mark set {mark}')
+            output.append(f'meta mark set meta mark & {fragment_mark_bit} | {mark}')
         if 'vrf' in rule_conf['set']:
             set_table = True
             vrf_name = rule_conf['set']['vrf']
@@ -600,7 +615,7 @@ def parse_rule(rule_conf, hook, fw_name, rule_id, ip_name):
                 table = rt_global_table
         if set_table:
             mark = 0x7FFFFFFF - int(table)
-            output.append(f'meta mark set {mark}')
+            output.append(f'meta mark set meta mark & {fragment_mark_bit} | {mark}')
         if 'tcp_mss' in rule_conf['set']:
             mss = rule_conf['set']['tcp_mss']
             output.append(f'tcp option maxseg size set {mss}')
@@ -698,15 +713,18 @@ def parse_time(time):
         if 'T' not in start and 'starttime' in time:
             start += f' {time["starttime"]}'
         out.append(f'time >= "{start}"')
-    if 'starttime' in time and 'startdate' not in time:
-        out.append(f'hour >= "{time["starttime"]}"')
     if 'stopdate' in time:
         stop = time['stopdate']
         if 'T' not in stop and 'stoptime' in time:
             stop += f' {time["stoptime"]}'
         out.append(f'time < "{stop}"')
-    if 'stoptime' in time and 'stopdate' not in time:
-        out.append(f'hour < "{time["stoptime"]}"')
+    # nft converts hours to UTC when loading the ruleset. Separate >= and <
+    # comparisons never match once the window crosses midnight in UTC, a range
+    # is turned into its complement by nft instead.
+    hour_start = time['starttime'] if 'starttime' in time and 'startdate' not in time else None
+    hour_stop = time['stoptime'] if 'stoptime' in time and 'stopdate' not in time else None
+    if hour_start or hour_stop:
+        out.append(f'hour "{hour_start or "00:00"}"-"{hour_stop or "23:59:59"}"')
     if 'weekdays' in time:
         days = [day.strip() for day in time['weekdays'].split(",") if day]
         out_days = [f'"{expand_weekday(day).title()}"' for day in days if day[0] != '!']

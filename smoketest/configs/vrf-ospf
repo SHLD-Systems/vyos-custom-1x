@@ -27,6 +27,7 @@ protocols {
         }
         parameters {
             abr-type cisco
+            opaque-lsa
             router-id 1.2.3.4
         }
         passive-interface default
@@ -38,8 +39,8 @@ system {
         commit-revisions 100
     }
     console {
-        device ttyS0 {
-            speed 115200
+        device @SERIAL_DEVICE@ {
+            speed @SERIAL_SPEED@
         }
     }
     host-name vyos
@@ -128,6 +129,7 @@ vrf {
                 }
                 parameters {
                     abr-type cisco
+                    opaque-lsa
                     router-id 9.10.11.12
                 }
                 passive-interface default

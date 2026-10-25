@@ -23,12 +23,16 @@ from base_vyostest_shim import VyOSUnitTestSHIM
 from ipaddress import ip_interface
 
 from vyos.configsession import ConfigSessionError
+from vyos.defaults import directories
+from vyos.defaults import podman_mount_program
+from vyos.utils.file import read_file
 from vyos.utils.network import get_interface_vrf
 from vyos.utils.process import cmdl
 from vyos.utils.process import process_named_running
 
 base_path = ['container']
 PROCESS_NAME = 'conmon'
+config_storage = '/etc/containers/storage.conf'
 
 busybox_image = 'busybox:stable'
 busybox_image_path = '/usr/share/vyos/busybox-stable.tar'
@@ -78,6 +82,10 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
 
     def test_basic(self):
         cont_name = 'c1'
+        env_key = 'TestKey'
+        env_key1 = 'TestKey1'
+        env_value = 'TestValue,*'
+        env_value1 = 'Test Spaced Values'
 
         self.cli_set(['interfaces', 'ethernet', 'eth0', 'address', '10.0.2.15/24'])
         self.cli_set(['protocols', 'static', 'route', '0.0.0.0/0',
@@ -92,6 +100,8 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         self.cli_set(base_path + ['name', cont_name, 'log-driver', 'journald'])
         self.cli_set(base_path + ['name', cont_name, 'allow-host-cgroups'])
         self.cli_set(base_path + ['name', cont_name, 'stop-timeout', '1'])
+        self.cli_set(base_path + ['name', cont_name, 'environment', env_key, 'value', env_value])
+        self.cli_set(base_path + ['name', cont_name, 'environment', env_key1, 'value', env_value1])
         # commit changes
         self.cli_commit()
 
@@ -105,6 +115,8 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         self.assertEqual(l['HostConfig']['LogConfig']['Type'], 'journald')
         self.assertEqual(l['Config']['Healthcheck']['Test'], ['NONE'])
         self.assertEqual(l['HostConfig']['CgroupMode'], 'host')
+        self.assertIn(f'{env_key}={env_value}', l['Config']['Env'])
+        self.assertIn(f'{env_key1}={env_value1}', l['Config']['Env'])
 
         # cleanup
         self.cli_delete(['interfaces', 'ethernet', 'eth0', 'address'])
@@ -560,6 +572,31 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         tmp = cmdl(['podman', 'exec', '-it', cont_name, 'id', '-g'], sudo=True)
         self.assertEqual(tmp, gid)
 
+    def test_tmpfs_chown(self):
+        cont_name = 'tmpfs-test'
+        uid = '1001'
+        gid = '100'
+        # /home exists in the busybox image and is not owned by the container
+        # user: without chown the tmpfs mounted over it is not writable
+        destination = '/home'
+
+        self.cli_set(base_path + ['name', cont_name, 'allow-host-networks'])
+        self.cli_set(base_path + ['name', cont_name, 'image', busybox_image])
+        self.cli_set(base_path + ['name', cont_name, 'uid', uid])
+        self.cli_set(base_path + ['name', cont_name, 'gid', gid])
+        self.cli_set(base_path + ['name', cont_name, 'stop-timeout', '1'])
+        self.cli_set(base_path + ['name', cont_name, 'tmpfs', 'home', 'destination', destination])
+        self.cli_set(base_path + ['name', cont_name, 'tmpfs', 'home', 'size', '1'])
+        self.cli_set(base_path + ['name', cont_name, 'tmpfs', 'home', 'chown'])
+        self.cli_commit()
+
+        self.assertTrue(self.is_running(cont_name))
+
+        # verify
+        tmp = cmdl(['podman', 'exec', '-it', cont_name, 'stat', '-c', '%u:%g', destination], sudo=True)
+        self.assertEqual(tmp, f'{uid}:{gid}')
+        cmdl(['podman', 'exec', '-it', cont_name, 'touch', f'{destination}/test'], sudo=True)
+
     def test_api_socket(self):
         base_name = 'api-test'
         container_list = range(1, 5)
@@ -609,6 +646,38 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         self.assertEqual(tmp, vrf_name)
 
         self.cli_delete(['vrf', 'name', vrf_name])
+
+    def test_storage_mount_program(self):
+        cont_name = 'storage-test'
+        graphroot = directories['podman_storage']
+
+        self.cli_set(base_path + ['name', cont_name, 'image', busybox_image])
+        self.cli_set(base_path + ['name', cont_name, 'allow-host-networks'])
+        self.cli_set(base_path + ['name', cont_name, 'stop-timeout', '1'])
+        self.cli_commit()
+
+        self.assertTrue(self.is_running(cont_name))
+
+        config = read_file(config_storage)
+        self.assertIn(f'graphroot = "{graphroot}"', config)
+
+        # fuse-overlayfs is only required when the graphroot sits on overlayfs
+        # (live boot), the kernel overlay driver is used everywhere else
+        fstype = cmdl(['findmnt', '--noheadings', '--output', 'FSTYPE',
+                       '--target', graphroot], sudo=True)
+        if fstype == 'overlay':
+            self.assertIn(f'mount_program = "{podman_mount_program}"', config)
+            return
+
+        self.assertNotIn('mount_program', config)
+
+        # Storage once used with a mount program keeps using fuse-overlayfs
+        # until it is reset, see T9456
+        flag = read_file(os.path.join(graphroot, 'overlay', '.has-mount-program'),
+                         defaultonfailure='', sudo=True)
+        if flag.strip() != 'true':
+            helper = os.path.basename(podman_mount_program)
+            self.assertIsNone(process_named_running(helper))
 
 if __name__ == '__main__':
     unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

@@ -532,7 +532,7 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
                     },
                 },
             },
-            'bar' : {
+            'bar.baz' : {
                 'rule' : {
                     '5' : {
                         'action' : 'permit',
@@ -615,7 +615,7 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
                     },
                 },
             },
-            'bar' : {
+            'bar.baz' : {
                 'rule' : {
                     '5' : {
                         'action' : 'permit',
@@ -675,6 +675,16 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
                     tmp += ' le ' + rule_config['le']
 
                 self.assertIn(tmp, config)
+
+    def test_prefix_list_name(self):
+        # T9346: prefix-list names use the VyOS 1.3 pattern '^[-_a-zA-Z0-9.]+$'
+        invalid_names = ['foo+bar', 'foo,bar', 'foo/bar', 'foo:bar']
+
+        for prefix_list in ['prefix-list', 'prefix-list6']:
+            for name in invalid_names:
+                with self.assertRaises(ConfigSessionError):
+                    path = base_path + [prefix_list, name, 'description', 'invalid']
+                    self.cli_set(path)
 
     def test_prefix_list_duplicates(self):
         # FRR does not allow to specify the same profix list rule multiple times
@@ -966,7 +976,7 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         ipv6_nexthop_type= 'blackhole'
 
         test_data = {
-            'foo-map-bar' : {
+            'foo-map.bar' : {
                 'rule' : {
                     '5' : {
                         'action' : 'permit',
@@ -1635,7 +1645,7 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        101:    from all fwmark 0x18 lookup 154
+        101:    from all fwmark 0x18/0x7fffffff lookup 154
         """
         tmp = cmdl(['ip', 'rule', 'show', 'prio', '101'])
 
@@ -1710,8 +1720,8 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        23:	from 203.0.113.1 to 203.0.113.5 fwmark 0x1e240 ipproto udp sport 5555 dport 8888 lookup 123
-        23:	from 203.0.113.2 to 203.0.113.5 fwmark 0x1e240 ipproto udp sport 5555 dport 8888 lookup 123
+        23:	from 203.0.113.1 to 203.0.113.5 fwmark 0x1e240/0x7fffffff ipproto udp sport 5555 dport 8888 lookup 123
+        23:	from 203.0.113.2 to 203.0.113.5 fwmark 0x1e240/0x7fffffff ipproto udp sport 5555 dport 8888 lookup 123
         """
         tmp = cmdl(['ip', 'rule', 'show', 'prio', rule])
 
@@ -1749,8 +1759,8 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        100:	from 203.0.113.11 fwmark 0x17 lookup 150
-        100:	from 203.0.113.12 fwmark 0x17 lookup 150
+        100:	from 203.0.113.11 fwmark 0x17/0x7fffffff lookup 150
+        100:	from 203.0.113.12 fwmark 0x17/0x7fffffff lookup 150
         """
         tmp = cmdl(['ip', 'rule', 'show', 'prio', '100'])
 
@@ -1801,10 +1811,10 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        103:	from 203.0.113.11 to 203.0.113.13 fwmark 0x17 lookup 150
-        103:	from 203.0.113.11 to 203.0.113.15 fwmark 0x17 lookup 150
-        103:	from 203.0.113.12 to 203.0.113.13 fwmark 0x17 lookup 150
-        103:	from 203.0.113.12 to 203.0.113.15 fwmark 0x17 lookup 150
+        103:	from 203.0.113.11 to 203.0.113.13 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.113.11 to 203.0.113.15 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.113.12 to 203.0.113.13 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.113.12 to 203.0.113.15 fwmark 0x17/0x7fffffff lookup 150
         """
         tmp = cmdl(['ip', 'rule', 'show', 'prio', '103'])
 
@@ -1845,7 +1855,7 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        100:    from all fwmark 0x18 lookup 154
+        100:    from all fwmark 0x18/0x7fffffff lookup 154
         """
         tmp = cmdl(['ip', '-6', 'rule', 'show', 'prio', '100'])
 
@@ -1887,8 +1897,8 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        102:	from 2001:db8:1338::/126 fwmark 0x17 lookup 150
-        102:	from 2001:db8:1339::/126 fwmark 0x17 lookup 150
+        102:	from 2001:db8:1338::/126 fwmark 0x17/0x7fffffff lookup 150
+        102:	from 2001:db8:1339::/126 fwmark 0x17/0x7fffffff lookup 150
         """
         tmp = cmdl(['ip', '-6', 'rule', 'show', 'prio', '102'])
 
@@ -1938,10 +1948,10 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        103:	from 2001:db8:1338::/126 to 2001:db8:13::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1338::/126 to 2001:db8:16::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1339::/56 to 2001:db8:13::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1339::/56 to 2001:db8:16::/48 fwmark 0x17 lookup 150
+        103:	from 2001:db8:1338::/126 to 2001:db8:13::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1338::/126 to 2001:db8:16::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1339::/56 to 2001:db8:13::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1339::/56 to 2001:db8:16::/48 fwmark 0x17/0x7fffffff lookup 150
         """
         tmp = cmdl(['ip', '-6', 'rule', 'show', 'prio', '103'])
 
@@ -1976,16 +1986,16 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         self.cli_commit()
 
         original = """
-        103:	from 203.0.113.0/24 to 203.0.116.5 fwmark 0x17 lookup 150
-        103:	from 203.0.114.5 to 203.0.112.0/24 fwmark 0x17 lookup 150
-        103:	from 203.0.114.5 to 203.0.116.5 fwmark 0x17 lookup 150
-        103:	from 203.0.113.0/24 to 203.0.112.0/24 fwmark 0x17 lookup 150
+        103:	from 203.0.113.0/24 to 203.0.116.5 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.114.5 to 203.0.112.0/24 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.114.5 to 203.0.116.5 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 203.0.113.0/24 to 203.0.112.0/24 fwmark 0x17/0x7fffffff lookup 150
         """
         original_v6 = """
-        103:	from 2001:db8:1338::/126 to 2001:db8:16::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1339::/56 to 2001:db8:13::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1339::/56 to 2001:db8:16::/48 fwmark 0x17 lookup 150
-        103:	from 2001:db8:1338::/126 to 2001:db8:13::/48 fwmark 0x17 lookup 150
+        103:	from 2001:db8:1338::/126 to 2001:db8:16::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1339::/56 to 2001:db8:13::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1339::/56 to 2001:db8:16::/48 fwmark 0x17/0x7fffffff lookup 150
+        103:	from 2001:db8:1338::/126 to 2001:db8:13::/48 fwmark 0x17/0x7fffffff lookup 150
         """
         tmp = cmdl(['ip', 'rule', 'show', 'prio', '103'])
         tmp_v6 = cmdl(['ip', '-6', 'rule', 'show', 'prio', '103'])
@@ -2097,6 +2107,29 @@ class TestPolicy(VyOSUnitTestSHIM.TestCase):
         for route_map in route_maps:
             config = self.getFRRconfig(f'route-map {route_map} permit {seq}', stop_section='^exit')
             self.assertNotIn(f' set', config)
+
+    def test_route_map_in_use_vrf(self):
+        # T9394: a route-map referenced only by a routing protocol inside a VRF
+        # must not be deletable - the default VRF has no routing protocol here
+        route_map = 'VRF-IN-USE'
+        vrf = 'red'
+        vrf_base = ['vrf', 'name', vrf]
+
+        self.cli_set(base_path + ['route-map', route_map, 'rule', '10', 'action', 'permit'])
+        self.cli_set(vrf_base + ['table', '1000'])
+        self.cli_set(vrf_base + ['protocols', 'ospf', 'redistribute', 'connected',
+                                 'route-map', route_map])
+        self.cli_commit()
+
+        self.cli_delete(base_path + ['route-map', route_map])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
+
+        # Removing the VRF together with the route-map is fine
+        self.cli_delete(vrf_base)
+        self.cli_delete(base_path + ['route-map', route_map])
+        self.cli_commit()
 
 def sort_ip(output):
     o = '\n'.join([' '.join(line.strip().split()) for line in output.strip().splitlines()])

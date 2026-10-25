@@ -23,11 +23,10 @@ from vyos.config import Config
 from vyos.configverify import has_frr_protocol_in_dict
 from vyos.configverify import verify_common_route_maps
 from vyos.configverify import verify_vrf
-from vyos.frrender import FRRender
+from vyos.frrender import get_dhcp_route_interfaces
 from vyos.frrender import get_frrender_dict
 from vyos.utils.dict import dict_search
 from vyos.utils.file import write_file
-from vyos.utils.process import is_systemd_service_running
 from vyos.template import render
 from vyos import ConfigError
 from vyos import airbag
@@ -99,15 +98,11 @@ def generate(config_dict):
     static = vrf and dict_search(f'vrf.name.{vrf}.protocols.static',
                                  config_dict) or config_dict['static']
 
-    # Collect interfaces that have DHCP configuration for DHCP hooks
-    dhcp_interfaces = set()
-
-    # Check for DHCP interfaces in route configurations
-    if 'route' in static:
-        for prefix, prefix_options in static['route'].items():
-            if 'dhcp_interface' in prefix_options:
-                for interface_name in prefix_options['dhcp_interface']:
-                    dhcp_interfaces.add(interface_name)
+    # Collect interfaces that have DHCP configuration for DHCP hooks. This must
+    # be derived from the entire config_dict and not from the (possibly
+    # VRF-narrowed) static dict above, as DHCP_HOOK_IFLIST is a single global
+    # file - a per VRF invocation would otherwise clobber the list.
+    dhcp_interfaces = get_dhcp_route_interfaces(config_dict)
 
     # Write the interface list for DHCP hooks or clean up if empty
     if dhcp_interfaces:
@@ -118,13 +113,9 @@ def generate(config_dict):
     # Put routing table names in /etc/iproute2/rt_tables
     render(config_file, 'iproute2/static.conf.j2', static)
 
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().generate(config_dict)
     return None
 
 def apply(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().apply()
     return None
 
 if __name__ == '__main__':

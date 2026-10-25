@@ -24,11 +24,9 @@ from vyos.configverify import verify_route_map
 from vyos.configverify import verify_interface_exists
 from vyos.configverify import verify_access_list
 from vyos.configverify import has_frr_protocol_in_dict
-from vyos.frrender import FRRender
 from vyos.frrender import get_frrender_dict
 from vyos.utils.dict import dict_search
 from vyos.utils.network import get_interface_config
-from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -53,6 +51,13 @@ def verify(config_dict):
     ospf = vrf and dict_search(f'vrf.name.{vrf}.protocols.ospf',
                                  config_dict) or config_dict['ospf']
     ospf['policy'] = config_dict['policy']
+
+    # FRR supports opaque LSAs only in the default VRF
+    if vrf and 'opaque' in ospf.get('capability', {}):
+        raise ConfigError(
+            'OSPF "capability opaque" is only supported in the '
+            f'default VRF, not in VRF "{vrf}"!'
+        )
 
     verify_common_route_maps(ospf)
 
@@ -198,13 +203,9 @@ def verify(config_dict):
     return None
 
 def generate(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().generate(config_dict)
     return None
 
 def apply(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().apply()
     return None
 
 if __name__ == '__main__':

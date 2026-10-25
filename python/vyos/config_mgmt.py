@@ -27,7 +27,9 @@ from textwrap import dedent
 from pathlib import Path
 from shutil import copy, chown
 from subprocess import Popen
+from subprocess import PIPE
 from subprocess import DEVNULL
+from urllib.parse import quote
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 from tabulate import tabulate
@@ -45,11 +47,14 @@ from vyos.version import get_full_version_data
 from vyos.utils.io import ask_yes_no
 from vyos.utils.io import catch_broken_pipe
 from vyos.utils.boot import boot_configuration_complete
+from vyos.utils.backend import vyconf_backend
 from vyos.utils.process import is_systemd_service_active
 from vyos.utils.process import rc_cmd
 from vyos.defaults import DEFAULT_COMMIT_CONFIRM_MINUTES
 from vyos.component_version import append_system_version
+from vyos.component_version import add_system_version_string
 from vyos.utils.file import file_compare
+from vyos.utils.file import write_file
 
 SAVE_CONFIG = '/usr/libexec/vyos/vyos-save-config.py'
 config_json = '/run/vyatta/config/config.json'
@@ -148,13 +153,14 @@ class ConfigMgmt:
         d = config.get_config_dict(
             ['system', 'config-management'],
             key_mangling=('-', '_'),
+            no_tag_node_value_mangle=True,
             get_first_key=True,
             with_recursive_defaults=True,
         )
 
         self.max_revisions = int(d.get('commit_revisions', 0))
         self.num_revisions = 0
-        self.locations = d.get('commit_archive', {}).get('location', [])
+        self.locations = d.get('commit_archive', {}).get('location', {})
         self.source_address = d.get('commit_archive', {}).get('source_address', '')
         self.reboot_unconfirmed = bool(
             d.get('commit_confirm', {}).get('action') == 'reboot'
@@ -174,9 +180,15 @@ class ConfigMgmt:
         # post-commit hook in conf_mode script
         base_path = ['system', 'config-management', 'commit-archive']
         location_path = base_path + ['location']
-        self.effective_locations = None
+        self.effective_locations = {}
         if config.exists_effective(location_path):
-            self.effective_locations = config.return_effective_values(location_path)
+            self.effective_locations = config.get_config_dict(
+                location_path,
+                effective=True,
+                key_mangling=('-', '_'),
+                no_tag_node_value_mangle=True,
+                get_first_key=True,
+            )
 
         vrf_path = base_path + ['vrf']
         self.effective_vrf = None
@@ -492,6 +504,71 @@ Proceed ?"""
             self._add_log_entry()
             self._update_archive()
 
+    @staticmethod
+    def _build_archive_url(proto: str, conf: dict) -> str:
+        """Reconstruct an upload URL from a structured commit-archive entry.
+
+        Credentials are stored as plain text and percent-encoded here so that
+        special characters do not corrupt the URL.
+        """
+        from vyos.template import is_ipv6
+
+        # git over file:// is a local repository: just a path, no host, port or
+        # credentials. Return early and leave the remote path below untouched.
+        if proto == 'git' and conf.get('transport') == 'file':
+            path = conf.get('path', '/')
+            if not path.startswith('/'):
+                path = f'/{path}'
+            path = quote(path, safe='/')
+            return f'git+file://{path}'
+
+        userinfo = ''
+        auth = conf.get('authentication', {})
+        username = auth.get('username', '')
+        password = auth.get('password', '')
+        # a lone password is emitted as ':password@' (empty user) so ftp/ftps
+        # keep their REMOTE_USERNAME/anonymous fallback for the user
+        if username or password:
+            userinfo = quote(username, safe='')
+            if password:
+                userinfo += f":{quote(password, safe='')}"
+            userinfo += '@'
+
+        # bracket IPv6 literals so the ':' are not read as host/port separators
+        server = conf['server']
+        if is_ipv6(server):
+            server = f'[{server}]'
+        netloc = server
+        if conf.get('port'):
+            netloc += f":{conf['port']}"
+
+        path = conf.get('path', '/')
+        if not path.startswith('/'):
+            path = f'/{path}'
+        if proto in ('scp', 'sftp', 'ssh', 'ftp', 'ftps'):
+            # these clients unquote the path once before use, so encode '%' as
+            # well: that single decode then restores the configured path,
+            # including a literal %2F
+            path = quote(path, safe='/')
+        else:
+            # http(s)/git keep the path encoded on the wire (the server/remote
+            # decodes it), so leave an existing %2F intact instead of
+            # double-encoding it
+            path = ''.join(
+                part if part.lower() == '%2f' else quote(part, safe='/')
+                for part in re.split('(%2[fF])', path)
+            )
+
+        if proto == 'git':
+            # default the transport to https here. Bare 'git' is the read-only
+            # native protocol and cannot push, so https is the
+            # sensible working default when none is configured.
+            transport = conf.get('transport', 'https')
+            scheme = f'git+{transport}'
+        else:
+            scheme = proto
+        return urlunsplit((scheme, f'{userinfo}{netloc}', path, '', ''))
+
     def commit_archive(self):
         """Upload config to remote archive."""
         from vyos.remote import upload
@@ -504,13 +581,35 @@ Proceed ?"""
 
         if self.effective_locations:
             print('Archiving config...')
-            for location in self.effective_locations:
-                url = urlsplit(location)
-                _, _, netloc = url.netloc.rpartition('@')
-                redacted_location = urlunsplit(url._replace(netloc=netloc))
-                print(f'  {redacted_location}', end=' ', flush=True)
-                upload(archive_config_file, f'{location}/{remote_file}',
-                       source_host=source_address, vrf=self.effective_vrf)
+            archive_failed = False
+            for name, archive in self.effective_locations.items():
+                for proto, conf in archive.items():
+                    location = self._build_archive_url(proto, conf)
+                    url = urlsplit(location)
+                    _, _, netloc = url.netloc.rpartition('@')
+                    redacted_location = urlunsplit(url._replace(netloc=netloc))
+                    print(f'  {name}: {redacted_location}', end=' ', flush=True)
+                    try:
+                        upload(
+                            archive_config_file,
+                            f'{location.rstrip("/")}/{remote_file}',
+                            source_host=source_address,
+                            vrf=self.effective_vrf,
+                        )
+                        print('OK', flush=True)
+                    except SystemExit:
+                        # upload() exits on failure and already prints the reason;
+                        # just end the status line and keep archiving the rest
+                        # instead of aborting the whole hook
+                        print(flush=True)
+                        archive_failed = True
+                    except KeyboardInterrupt:
+                        # a user interrupt aborts the whole archive run cleanly
+                        # rather than moving on to the next destination
+                        sys.exit(1)
+
+            if archive_failed:
+                sys.exit(1)
 
     # op-mode functions
     #
@@ -625,7 +724,7 @@ Proceed ?"""
         cmp_saved = f'/tmp/config.boot.{ext}'
 
         if boot_configuration_complete():
-            save_config(cmp_saved, json_out=config_json)
+            self._save_active_config(cmp_saved)
         else:
             copy(config_file, cmp_saved)
 
@@ -656,6 +755,26 @@ Proceed ?"""
             return False
 
         return True
+
+    def _save_active_config(self, target):
+        """Write the active config and its JSON the way vyos-save-config.py
+        does, from the tree this object already holds: running that script
+        built a second full Config() for the same content."""
+        ct = self.active_config
+        if ct is None:
+            save_config(target, json_out=config_json)
+            return
+        try:
+            write_file(target, add_system_version_string(ct.to_string()))
+        except OSError as e:
+            # as save_config() does when vyos-save-config.py fails
+            logger.critical(f'save config failed: {e}')
+            return
+        try:
+            with open(config_json, 'w') as f:
+                f.write(ct.to_json())
+        except OSError as e:
+            logger.warning(f'cannot write {config_json}: {e}')
 
     @staticmethod
     def _update_archive():
@@ -802,22 +921,62 @@ Proceed ?"""
         os.umask(mask)
 
 
+def _committed_config():
+    """Config for the post-commit hooks.
+
+    The hooks run after the commit has written the active config, so the
+    working config is the same tree. Read it once, from the active store.
+    Config() reads it twice, and its working-config read goes through the
+    session's unionfs-fuse, which takes seconds on a large config.
+    """
+    from vyos.configsource import ConfigSourceString
+
+    # after a failed or partial commit read the config the stock way (full
+    # Config()): a faster read here lets a scripted discard + set land inside
+    # vyatta-cfg's unionfs-fuse cache window after discard, where the set fails
+    if os.environ.get('COMMIT_STATUS', 'SUCCESS') != 'SUCCESS':
+        return None
+
+    # with the vyconf backend Config() reads the vyconf session, not the
+    # legacy store: keep that path
+    if vyconf_backend() and boot_configuration_complete():
+        return None
+
+    # read stdout only, unmodified, as ConfigSourceSession does
+    p = Popen(['/bin/cli-shell-api', '--show-active-only', '--show-show-defaults',
+               '--show-ignore-edit', 'showConfig'], stdout=PIPE)
+    text = p.communicate()[0].decode()
+    if p.returncode != 0 or not text:
+        return None
+    # as ConfigSourceSession: no running config until the boot config is
+    # loaded, so the boot commit's hooks see no effective values (and do not
+    # upload the archive)
+    running = text if boot_configuration_complete() else ''
+    return Config(config_source=ConfigSourceString(running_config_text=running,
+                                                   session_config_text=text))
+
+
 # entry_point for console script
 #
 @catch_broken_pipe
 def run():
     from argparse import ArgumentParser, REMAINDER
 
-    config_mgmt = ConfigMgmt()
-
     for s in list(commit_hooks):
         if sys.argv[0].replace('-', '_').endswith(s):
+            try:
+                config = _committed_config()
+            except Exception:  # pylint: disable=broad-exception-caught
+                config = None  # ConfigMgmt() falls back to a full Config()
+            config_mgmt = ConfigMgmt(config=config)
             func = getattr(config_mgmt, s)
             try:
                 func()
             except Exception as e:
                 print(f'{s}: {e}')
             sys.exit(0)
+
+    config_mgmt = ConfigMgmt()
 
     parser = ArgumentParser()
     subparsers = parser.add_subparsers(dest='subcommand')

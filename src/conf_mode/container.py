@@ -27,6 +27,8 @@ from vyos.configdict import dict_merge
 from vyos.configdict import node_changed
 from vyos.configdict import is_node_changed
 from vyos.configverify import verify_vrf
+from vyos.defaults import directories
+from vyos.defaults import podman_mount_program
 from vyos.container import get_container_host_ifname
 from vyos.container import restart_network
 from vyos.utils.configfs import delete_cli_node
@@ -67,6 +69,17 @@ def network_exists(name):
     return bool(c)
 
 
+def storage_on_overlayfs() -> bool:
+    """podman refuses native overlay on top of overlayfs, which is the case
+    on live boot where there is no persistence partition. Only then is
+    fuse-overlayfs required as mount_program (T5003)."""
+    path = os.path.realpath(directories['podman_storage'])
+    mounts = {p.mountpoint: p.fstype for p in psutil.disk_partitions(all=True)}
+    while path not in mounts and path != '/':
+        path = os.path.dirname(path)
+    return mounts.get(path) == 'overlay'
+
+
 # Common functions
 def get_config(config=None):
     if config:
@@ -105,6 +118,9 @@ def get_config(config=None):
 
     tmp = node_changed(conf, base + ['name'])
     if tmp: container.update({'container_remove': tmp})
+
+    if container and storage_on_overlayfs():
+        container['storage_mount_program'] = podman_mount_program
 
     return container
 
@@ -473,7 +489,7 @@ def generate_quadlet_options(name, container_config, host_ident, network_config)
 
     if 'environment' in container_config:
         for k, v in container_config['environment'].items():
-            out.append(f'Environment={k}={v["value"]}')
+            out.append(f'Environment={k}="{v["value"]}"')
 
     if 'health_check' in container_config:
         if 'command' in container_config['health_check']:
@@ -499,7 +515,7 @@ def generate_quadlet_options(name, container_config, host_ident, network_config)
 
     if 'label' in container_config:
         for k, v in container_config['label'].items():
-            out.append(f'Label={k}={v["value"]}')
+            out.append(f'Label={k}="{v["value"]}"')
 
     if 'name_server' in container_config:
         for ns in container_config['name_server']:
@@ -570,13 +586,20 @@ def generate_quadlet_options(name, container_config, host_ident, network_config)
 
     if 'sysctl' in container_config and 'parameter' in container_config['sysctl']:
         for k, v in container_config['sysctl']['parameter'].items():
-            out.append(f'Sysctl={k}={v["value"]}')
+            out.append(f'Sysctl={k}="{v["value"]}"')
 
     if 'tmpfs' in container_config:
         for tmpfs_config in container_config['tmpfs'].values():
             dest = tmpfs_config['destination']
             size = tmpfs_config['size']
-            out.append(f'Mount=type=tmpfs,tmpfs-size={size}M,destination={dest}')
+            mount = f'type=tmpfs,tmpfs-size={size}M,destination={dest}'
+            # A tmpfs mounted over a directory that already exists in the image
+            # is owned by root:root 0755 with runc, whatever the image intended,
+            # so a container running as a non-root user cannot write to it.
+            # The `U` option chowns the mount to the container user.
+            if 'chown' in tmpfs_config:
+                mount += ',U'
+            out.append(f'Mount={mount}')
 
     if 'uid' in container_config:
         uid = container_config['uid']

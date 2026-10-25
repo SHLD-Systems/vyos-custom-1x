@@ -31,7 +31,7 @@ from vyos.base import Warning
 from vyos.config import Config, config_dict_merge
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
-from vyos.configdict import node_changed, is_member
+from vyos.configdict import node_changed, is_member, is_node_changed
 from vyos.configverify import verify_interface_exists
 from vyos.configverify import verify_virtual_interface_exists
 from vyos.ifconfig import Section
@@ -47,6 +47,9 @@ from vyos.utils.kernel import unload_kmod
 from vyos.utils.kernel import list_loaded_modules
 from vyos.utils.process import call
 from vyos.utils.process import is_systemd_service_active
+from vyos.utils.system import sysctl_read
+from vyos.utils.system import sysctl_read_default
+from vyos.utils.system import sysctl_write
 
 from vyos.vpp import VPPControl
 from vyos.vpp import control_host
@@ -65,6 +68,7 @@ from vyos.vpp.config_verify import (
     verify_vpp_mac_change_supported,
 )
 from vyos.vpp.config_resource_checks import memory
+from vyos.vpp.config_resource_checks.resource_defaults import default_resource_map
 from vyos.vpp.config_filter import iface_filter_eth
 from vyos.vpp.utils import EthtoolGDrvinfo
 from vyos.vpp.utils import cli_ethernet_with_vifs_ifaces
@@ -76,9 +80,16 @@ service_name = 'vpp'
 service_conf = Path(f'/run/vpp/{service_name}.conf')
 systemd_override = '/run/systemd/system/vpp.service.d/10-override.conf'
 
-vpp_log = getLogger(
-    service_name, format='%(filename)s[%(process)d]: %(message)s', address='/dev/log'
-)
+try:
+    vpp_log = getLogger(
+        service_name,
+        format='%(filename)s[%(process)d]: %(message)s',
+        address='/dev/log',
+    )
+except ValueError:
+    # vpp.py is re-executed when run as a config dependency (T9146); the named
+    # logger is created only once, so reuse the existing instance on re-import.
+    vpp_log = getLogger(service_name)
 
 dependency_interface_type_map = {
     'vpp_interfaces_bonding': 'bonding',
@@ -173,6 +184,36 @@ def _unload_module(module_name: str):
         raise
 
 
+def _raise_netlink_rmem_max(required: int):
+    """
+    The kernel caps the netlink receive buffer VPP requests (nl-rx-buffer-size)
+    at net.core.rmem_max. Raise the limit before VPP opens its netlink sockets;
+    a higher value is kept. VPP re-opens its socket on every netlink resync,
+    so system_sysctl.py does not lower the limit while VPP is configured.
+    """
+    current = sysctl_read(['net', 'core', 'rmem_max'])
+    if not current.isdigit() or int(current) < required:
+        if not sysctl_write(['net', 'core', 'rmem_max'], required):
+            Warning(
+                f'Could not set net.core.rmem_max to {required}: VPP can miss '
+                'interface and route updates from the kernel, and the dataplane '
+                'may not match the configuration!'
+            )
+
+
+def _restore_netlink_rmem_max(rmem_max: str | None):
+    """
+    VPP is removed: set net.core.rmem_max back to the value from system sysctl,
+    or to the default from sysctl.d. system_sysctl.py does not run when only
+    VPP is removed.
+    """
+    if not rmem_max:
+        rmem_max = sysctl_read_default(['net', 'core', 'rmem_max'])
+
+    if rmem_max and rmem_max.isdigit():
+        sysctl_write(['net', 'core', 'rmem_max'], rmem_max)
+
+
 def _configure_vpp_cpu_settings(config: dict):
     """Configure VPP CPU settings: main-core and corelist-workers based on 'cpu-cores'.
 
@@ -207,6 +248,24 @@ def _normalize_buffers(config: dict):
         config['settings']['resource_allocation']['buffers']['buffers_per_numa'] = str(
             buffers
         )
+
+
+def _set_no_multi_seg(config: dict):
+    """Enable 'no-multi-seg' when the largest VPP interface MTU fits one buffer.
+
+    Disabling multi-segment buffers boosts throughput, but a received frame must
+    then fit a single buffer - i.e. the largest interface MTU (plus L2 framing)
+    must fit within the buffer 'data-size'. When it does, set the flag so the
+    template emits 'no-multi-seg'; otherwise leave it unset so VPP keeps
+    multi-seg and can still carry Jumbo frames without a bigger buffer (T9146).
+    """
+    max_mtu = max(
+        (int(c['mtu']) for c in config['settings'].get('interface', {}).values()),
+        default=1500,
+    )
+    data_size = config['settings']['resource_allocation']['buffers']['data_size']
+    if memory.no_multi_seg_fits(max_mtu, data_size):
+        config['settings']['no_multi_seg'] = True
 
 
 def _get_max_xdp_rx_queues(config: dict):
@@ -269,6 +328,12 @@ def get_config(config=None):
     base = ['vpp']
     base_settings = ['vpp', 'settings']
 
+    if is_node_changed(
+        conf,
+        base_settings + ['resource-allocation', 'memory', 'stats', 'per-node-counters'],
+    ):
+        set_dependents('vpp_per_node_counters', conf)
+
     # find interfaces removed from VPP
     effective_config = conf.get_config_dict(
         base,
@@ -319,6 +384,12 @@ def get_config(config=None):
             'persist_config': eth_ifaces_persist,
             'interfaces_vpp': interfaces_config,
             'pppoe_ifaces': pppoe_ifaces,
+            'rmem_max_configured': conf.return_value(
+                ['system', 'sysctl', 'parameter', 'net.core.rmem_max', 'value']
+            ),
+            'vpp_exporter_configured': conf.exists(
+                ['service', 'monitoring', 'prometheus', 'vpp-exporter']
+            ),
             'remove': {},
         }
 
@@ -376,11 +447,21 @@ def get_config(config=None):
     ifaces_with_vifs = cli_ethernet_with_vifs_ifaces(conf, include_nested_vifs=True)
 
     if 'settings' in config:
+        # nl-rx-buffer-size in startup.conf, and the net.core.rmem_max it needs
+        config['settings']['netlink_rx_buffer_size'] = default_resource_map[
+            'netlink_rx_buffer_size'
+        ]
+
         if 'interface' in config['settings']:
             interface_rx_mode = config['settings'].get('interface_rx_mode')
 
             for iface, iface_config in config['settings']['interface'].items():
                 iface_config['driver'] = 'dpdk'
+                # configured MTU, used to set no_multi_seg option
+                iface_config['mtu'] = (
+                    conf.return_value(['interfaces', 'ethernet', iface, 'mtu'])
+                    or '1500'
+                )
 
                 # old_driver = leaf_node_changed(
                 #     conf, base_settings + ['interface', iface, 'driver']
@@ -478,6 +559,11 @@ def get_config(config=None):
                         xdp_api_params['flags'] = 'no_syscall_lock'
                     iface_config['xdp_api_params'] = xdp_api_params
 
+        # Enable 'no-multi-seg' only when the buffer data-size can hold the
+        # largest interface MTU in a single segment (T9146); otherwise VPP keeps
+        # multi-seg so Jumbo frames still work.
+        _set_no_multi_seg(config)
+
         # Buffer normalization (auto → computed)
         _normalize_buffers(config)
         # Configure VPP main-core and workers 'cpu-cores' settings
@@ -536,6 +622,12 @@ def get_config(config=None):
 
 
 def verify(config):
+    if 'remove' in config and config.get('vpp_exporter_configured'):
+        raise ConfigError(
+            'VPP cannot be removed while the VPP Prometheus exporter is configured. '
+            'Remove the VPP exporter first.'
+        )
+
     if config.get('interfaces_vpp') and 'remove' in config:
         raise ConfigError(
             'VPP cannot be removed while VPP interfaces exist. Remove all "interfaces vpp" first!'
@@ -747,6 +839,8 @@ def apply(config):
         # Unlod modules (modprobe -r)
         for module in modules:
             _unload_module(module)
+
+        _restore_netlink_rmem_max(config.get('rmem_max_configured'))
     else:
         # Some interfaces required extra preparation before VPP can be started
         if 'settings' in config and 'interface' in config.get('settings'):
@@ -791,6 +885,8 @@ def apply(config):
                             config['persist_config'][iface]['dev_id'],
                             override_drivers[k_module],
                         )
+
+        _raise_netlink_rmem_max(config['settings']['netlink_rx_buffer_size'])
 
         call('systemctl daemon-reload')
         call(f'systemctl restart {service_name}.service')

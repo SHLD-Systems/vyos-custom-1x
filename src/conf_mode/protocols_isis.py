@@ -21,12 +21,10 @@ from vyos.config import Config
 from vyos.configverify import has_frr_protocol_in_dict
 from vyos.configverify import verify_common_route_maps
 from vyos.configverify import verify_interface_exists
-from vyos.frrender import FRRender
 from vyos.frrender import get_frrender_dict
 from vyos.ifconfig import Interface
 from vyos.utils.dict import dict_search
 from vyos.utils.network import get_interface_config
-from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -268,16 +266,20 @@ def verify(config_dict):
         if not dict_search('segment_routing.srv6.interface', isis):
             raise ConfigError('Missing interface used for installing SRv6 SIDs')
 
+    # Check mpls-te exclusivity with distribute link-state
+    if dict_search('distribute.link_state', isis) is not None and dict_search(
+        'traffic_engineering', isis
+    ):
+        raise ConfigError(
+            'traffic-engineering is mutually exclusive with distribute link-state'
+        )
+
     return None
 
 def generate(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().generate(config_dict)
     return None
 
 def apply(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().apply()
     return None
 
 if __name__ == '__main__':

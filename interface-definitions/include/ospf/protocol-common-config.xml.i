@@ -406,9 +406,7 @@
       <format>txt</format>
       <description>Interface name</description>
     </valueHelp>
-    <constraint>
-      #include <include/constraint/interface-name.xml.i>
-    </constraint>
+    #include <include/constraint/dependent-error-interface-name.xml.i>
   </properties>
   <children>
     <leafNode name="area">
@@ -641,12 +639,6 @@
         </constraint>
       </properties>
       <defaultValue>cisco</defaultValue>
-    </leafNode>
-    <leafNode name="opaque-lsa">
-      <properties>
-        <help>Enable the Opaque-LSA capability (rfc2370)</help>
-        <valueless/>
-      </properties>
     </leafNode>
     <leafNode name="rfc1583-compatibility">
       <properties>

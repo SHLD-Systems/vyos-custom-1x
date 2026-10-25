@@ -25,6 +25,7 @@ from vyos.utils.file import read_file
 PROCESS_NAME = 'telegraf'
 TELEGRAF_CONF = '/run/telegraf/telegraf.conf'
 base_path = ['service', 'monitoring', 'telegraf']
+prometheus_base_path = ['service', 'monitoring', 'prometheus']
 org = 'log@in.local'
 token = 'GuRJc12tIzfjnYdKRAIYbxdWd2aTpOT9PVYNddzDnFV4HkAcD7u7-kndTFXjGuXzJN6TTxmrvPODB4mnFcseDV=='
 port = '8888'
@@ -33,6 +34,13 @@ bucket = 'main'
 inputs = ['cpu', 'disk', 'mem', 'net', 'system', 'kernel', 'interrupts', 'syslog']
 
 class TestMonitoringTelegraf(VyOSUnitTestSHIM.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super(TestMonitoringTelegraf, cls).setUpClass()
+        # ensure we can also run this test on a live system - so lets clean
+        # out the current configuration :)
+        cls.cli_delete(cls, base_path)
+
     def tearDown(self):
         # Check for running process
         self.assertTrue(process_named_running(PROCESS_NAME))
@@ -43,7 +51,8 @@ class TestMonitoringTelegraf(VyOSUnitTestSHIM.TestCase):
         # always forward to base class
         super().tearDown()
 
-    def test_01_basic_config(self):
+    def basic_influxdb_setup(self):
+        # Basic setup so config file gets made
         self.cli_set(base_path + ['influxdb', 'authentication', 'organization', org])
         self.cli_set(base_path + ['influxdb', 'authentication', 'token', token])
         self.cli_set(base_path + ['influxdb', 'port', port])
@@ -51,6 +60,9 @@ class TestMonitoringTelegraf(VyOSUnitTestSHIM.TestCase):
 
         # commit changes
         self.cli_commit()
+
+    def test_01_basic_config(self):
+        self.basic_influxdb_setup()
 
         config = read_file(TELEGRAF_CONF)
 
@@ -119,6 +131,151 @@ class TestMonitoringTelegraf(VyOSUnitTestSHIM.TestCase):
         self.cli_delete(base_path + ['global-tag', 'incomplete-tag'])
         self.cli_commit()
 
+    def test_05_frr_metrics_requires_frr_exporter(self):
+        # frr-metrics can not be enabled unless the Prometheus frr-exporter
+        # is configured
+        self.cli_set(base_path + ['prometheus-client'])
+        self.cli_set(base_path + ['frr-metrics'])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_delete(base_path + ['frr-metrics'])
+        # commit again to leave a valid, running config for tearDown()
+        self.cli_commit()
+
+    def test_06_frr_metrics(self):
+        frr_exporter_port = '9342'
+        self.cli_set(base_path + ['prometheus-client'])
+        self.cli_set(prometheus_base_path + ['frr-exporter'])
+        self.cli_set(base_path + ['frr-metrics'])
+
+        # commit changes
+        self.cli_commit()
+
+        config = read_file(TELEGRAF_CONF)
+        self.assertIn(f'[[inputs.prometheus]]', config)
+        self.assertIn(
+            f'urls = ["http://127.0.0.1:{frr_exporter_port}/metrics"]', config
+        )
+        self.assertIn(f'metric_version = 2', config)
+        self.assertIn(f'name_override = "frr"', config)
+
+        # frr-metrics must be removed together with frr-exporter, otherwise
+        # the next commit fails verification and leaves telegraf stopped
+        self.cli_delete(base_path + ['frr-metrics'])
+        self.cli_delete(prometheus_base_path)
+        self.cli_commit()
+
+    def test_07_frr_metrics_tracks_frr_exporter_changes(self):
+        # T9260 regression test: changing frr-exporter's listen-address or
+        # port alone - without touching "service monitoring telegraf" at
+        # all - must still refresh the scrape URL Telegraf renders, since
+        # Telegraf's own conf-mode script is not otherwise re-run when only
+        # frr-exporter's subtree changes
+        new_listen_address = '127.0.0.2'
+        new_port = '9999'
+
+        self.cli_set(base_path + ['prometheus-client'])
+        self.cli_set(prometheus_base_path + ['frr-exporter'])
+        self.cli_set(base_path + ['frr-metrics'])
+        self.cli_commit()
+
+        config = read_file(TELEGRAF_CONF)
+        self.assertIn('urls = ["http://127.0.0.1:9342/metrics"]', config)
+
+        # Only touch the Prometheus frr-exporter subtree
+        self.cli_set(
+            prometheus_base_path
+            + ['frr-exporter', 'listen-address', new_listen_address]
+        )
+        self.cli_set(prometheus_base_path + ['frr-exporter', 'port', new_port])
+        self.cli_commit()
+
+        config = read_file(TELEGRAF_CONF)
+        self.assertIn(
+            f'urls = ["http://{new_listen_address}:{new_port}/metrics"]', config
+        )
+
+        self.cli_delete(base_path + ['frr-metrics'])
+        self.cli_delete(prometheus_base_path)
+        self.cli_commit()
+
+    def test_08_agent_configuration(self):
+        """
+        Testing for agent configuration values
+        Includes good values and bad values
+        """
+        # Make sure config file is made
+        self.basic_influxdb_setup()
+
+        config = read_file(TELEGRAF_CONF)
+
+        # Check default values are correct
+        self.assertIn("collection_jitter = \"5s\"", config)
+        self.assertIn("debug = false", config)
+        self.assertIn("flush_interval = \"15s\"", config)
+        self.assertIn("flush_jitter = \"0s\"", config)
+        self.assertIn("interval = \"15s\"", config)
+
+        # Set new values
+        self.cli_set(base_path + ['agent', 'collection-jitter', "1s"])
+        self.cli_set(base_path + ['agent', 'debug'])
+        self.cli_set(base_path + ['agent', 'flush-interval', "2s"])
+        self.cli_set(base_path + ['agent', 'flush-jitter', "3s"])
+        self.cli_set(base_path + ['agent', 'interval', "4s"])
+
+        # Commit new values
+        self.cli_commit()
+
+        # Check values changed
+        config = read_file(TELEGRAF_CONF)
+        self.assertIn("collection_jitter = \"1s\"", config)
+        self.assertIn("debug = true", config)
+        self.assertIn("flush_interval = \"2s\"", config)
+        self.assertIn("flush_jitter = \"3s\"", config)
+        self.assertIn("interval = \"4s\"", config)
+
+        # Check bad values error correctly
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'collection-jitter', "1units"])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'flush-interval', "2units"])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'flush-jitter', "3units"])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'interval', "4units"])
+
+        # Make sure 0 is not allowed
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'interval', "0s"])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_set(base_path + ['agent', 'flush-interval', "0s"])
+
+        # Make sure max value is not broken
+        max_s = 9223372037
+
+        self.cli_set(base_path + ['agent', 'collection-jitter', f"{max_s}s"])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
+
+        self.cli_set(base_path + ['agent', 'flush-interval', f"{max_s}s"])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
+
+        self.cli_set(base_path + ['agent', 'flush-jitter', f"{max_s}s"])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
+
+        self.cli_set(base_path + ['agent', 'interval', f"{max_s}s"])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+        self.cli_discard()
 
 if __name__ == '__main__':
     unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

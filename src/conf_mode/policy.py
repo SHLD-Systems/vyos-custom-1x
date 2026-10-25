@@ -19,11 +19,9 @@ from sys import exit
 
 from vyos.config import Config
 from vyos.configverify import has_frr_protocol_in_dict
-from vyos.frrender import FRRender
 from vyos.frrender import frr_protocols
 from vyos.frrender import get_frrender_dict
 from vyos.utils.dict import dict_search
-from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos.base import Warning
 from vyos import airbag
@@ -76,11 +74,20 @@ def routing_policy_find(key, dictionary):
     # a given key as generator object. This is made for routing policies,
     # thus also import/export is checked
     for k, v in dictionary.items():
+        # Copies of other VRFs, possibly from the effective config - every VRF
+        # is checked on its own
+        if k == 'dependent_vrfs':
+            continue
         if k == key:
             if isinstance(v, dict):
                 for a, b in v.items():
                     if a in ['import', 'export']:
                         yield b
+                    # BGP "route-map vrf|vpn import|export"
+                    elif a in ['vrf', 'vpn'] and isinstance(b, dict):
+                        for direction in ['import', 'export']:
+                            if direction in b:
+                                yield b[direction]
             else:
                 yield v
         elif isinstance(v, dict):
@@ -119,6 +126,16 @@ def verify(config_dict):
             policy.update({'protocol': {}})
         policy['protocol'].update({protocol : config_dict[protocol]})
 
+    if 'vrf' in config_dict and 'name' in config_dict['vrf']:
+        for vrf_name, vrf_config in config_dict['vrf']['name'].items():
+            if 'protocols' not in vrf_config:
+                continue
+            if 'protocol' not in policy:
+                policy.update({'protocol': {}})
+            if 'vrf' not in policy['protocol']:
+                policy['protocol'].update({'vrf': {}})
+            policy['protocol']['vrf'].update({vrf_name : vrf_config['protocols']})
+
     for policy_type in policy_types:
         # Bail out early and continue with next policy type
         if policy_type not in policy:
@@ -133,7 +150,7 @@ def verify(config_dict):
 
             # human readable instance name (hyphen instead of underscore)
             policy_hr = policy_type.replace('_', '-')
-            entries = []
+            entries = set()
             for rule, rule_config in instance_config['rule'].items():
                 mandatory_error = f'must be specified for "{policy_hr} {instance} rule {rule}"!'
                 if 'action' not in rule_config:
@@ -187,10 +204,11 @@ def verify(config_dict):
                             f'"le" ({le})'
                         )
 
-                    if rule_config in entries:
+                    key = tuple(sorted(rule_config.items()))
+                    if key in entries:
                         raise ConfigError(
                             f'Rule "{rule}" contains a duplicate prefix definition!')
-                    entries.append(rule_config)
+                    entries.add(key)
 
     # route-maps tend to be a bit more complex so they get their own verify() section
     if 'route_map' in policy:
@@ -299,13 +317,9 @@ def verify(config_dict):
 
 
 def generate(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().generate(config_dict)
     return None
 
 def apply(config_dict):
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().apply()
     return None
 
 if __name__ == '__main__':
