@@ -73,13 +73,20 @@ def _load_config_sync_settings() -> dict:
     key = secondary.get('key')
     port = int(secondary.get('port', 443))
     timeout = int(secondary.get('timeout')) if secondary.get('timeout') else None
+    _verify_raw = secondary.get('verify', False)
+    if isinstance(_verify_raw, bool):
+        verify_tls = _verify_raw
+    elif isinstance(_verify_raw, dict):
+        verify_tls = True
+    else:
+        verify_tls = str(_verify_raw).lower() == 'true'
 
     if not address or not key:
         raise opmode.UnconfiguredObject(
             'Config-sync is not fully configured: missing secondary address/key'
         )
 
-    return dict(host=address, key=key, port=port, timeout=timeout)
+    return dict(host=address, key=key, port=port, timeout=timeout, verify_tls=verify_tls)
 
 
 class ConfigSyncDiffManager:
