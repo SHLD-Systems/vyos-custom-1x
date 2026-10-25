@@ -72,6 +72,35 @@ def verify(lb):
             if 'nexthop' not in health_conf:
                 raise ConfigError(f'Nexthop must be configured for interface {ifname}')
 
+            # SLA verification: validate per-interface SLA thresholds when configured.
+            # max-latency H controls latency sensitivity (1-10000 ms), max-loss M controls loss sensitivity (1-100%),
+            # penalty-baseline C (1-99 handled by XML validator) scales baseline independently.
+            # These ranges match the piecewise penalty y = min((1/(1-l/M)*H/(H-L))*C/100,1) if L<H else 1.
+            # Keeping verification here ensures user errors are caught before daemon computes factor = 1 - y.
+            if 'sla' in health_conf:
+                sla = health_conf['sla']
+                if 'max_latency' in sla:
+                    try:
+                        ml = int(sla['max_latency'])
+                        if ml < 1 or ml > 10000:
+                            raise ConfigError(f'SLA max-latency must be 1-10000 ms for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA max-latency for interface {ifname}')
+                if 'max_loss' in sla:
+                    try:
+                        mh = int(sla['max_loss'])
+                        if mh < 1 or mh > 100:
+                            raise ConfigError(f'SLA max-loss must be 1-100 percent for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA max-loss for interface {ifname}')
+                if 'penalty_baseline' in sla:
+                    try:
+                        pb = int(sla['penalty_baseline'])
+                        if pb < 1 or pb > 99:
+                            raise ConfigError(f'SLA penalty-baseline must be 1-99 percent for interface {ifname}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid SLA penalty-baseline for interface {ifname}')
+
             if 'test' not in health_conf:
                 continue
 
@@ -84,6 +113,21 @@ def verify(lb):
 
                 if test_conf['type'] in ['ping', 'ttl'] and 'target' not in test_conf:
                     raise ConfigError(f'Missing target for {test_conf["type"]} health test {test_id} on interface {ifname}')
+
+                if 'ping_count' in test_conf:
+                    try:
+                        pc = int(test_conf['ping_count'])
+                        if pc < 1 or pc > 50:
+                            raise ConfigError(f'ping-count must be 1-50 for interface {ifname} test {test_id}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid ping-count for interface {ifname} test {test_id}')
+                if 'ping_interval' in test_conf:
+                    try:
+                        pi = float(test_conf['ping_interval'])
+                        if pi < 0.1 or pi > 5:
+                            raise ConfigError(f'ping-interval must be 0.1-5 seconds for interface {ifname} test {test_id}')
+                    except ValueError:
+                        raise ConfigError(f'Invalid ping-interval for interface {ifname} test {test_id}')
     else:
         raise ConfigError('Interface health tests must be configured')
 

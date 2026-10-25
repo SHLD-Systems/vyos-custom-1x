@@ -27,12 +27,25 @@ import vyos.opmode
 
 wlb_status_file = '/run/wlb_status.json'
 
+# Extended status format now includes SLA metrics populated by vyos-load-balancer daemon.
+# health_state per interface contains both legacy boolean state and new SLA fields:
+# sla_latency (avg RTT ms), sla_loss (ratio 0..1), sla_penalty 0..1 from
+# y = min((1/(1-l/M)*H/(H-L))*C/100,1) if L<H else 1, sla_factor = 1 - penalty,
+# sla_m = M% (max loss), sla_h = H ms (max latency), sla_c = C% (baseline).
+# These are rendered for operator visibility; effective weight = base_weight * sla_factor
+# normalized to 10 bins per max effective weight in wlb_weight_interfaces (filtered <0.05).
 status_format = '''Interface: {ifname}
 Status: {status}
 Last Status Change: {last_change}
 Last Interface Success: {last_success}
 Last Interface Failure: {last_failure}
 Interface Failures: {failures}
+SLA Latency: {sla_latency} ms (H={sla_h} ms)
+SLA Loss: {sla_loss}% (M={sla_m}%)
+SLA Baseline: {sla_c}%
+SLA Penalty: {sla_penalty}
+SLA Factor: {sla_factor}
+Effective Weight Factor: {sla_factor}
 '''
 
 def _verify(func):
@@ -66,13 +79,23 @@ def _get_formatted_output(raw_data):
         failure_dt = datetime.fromtimestamp(if_data['last_failure']) if if_data['last_failure'] > 0 else None
         now = datetime.fromtimestamp(time())
 
+        # Build display dict mixing legacy health and new SLA dynamic weight state.
+        # SLA fields default to 0/1/50 for backward compatibility with pre-SLA status files.
+        # Loss stored as ratio 0..1 in JSON, converted to percent for display.
         fmt_data = {
             'ifname': ifname,
             'status': "active" if if_data['state'] else "failed",
             'last_change': change_dt.strftime("%Y-%m-%d %H:%M:%S") if change_dt else 'N/A',
             'last_success': str(now - success_dt) if success_dt else 'N/A',
             'last_failure': str(now - failure_dt) if failure_dt else 'N/A',
-            'failures': if_data['failure_count']
+            'failures': if_data['failure_count'],
+            'sla_latency': f"{if_data.get('sla_latency', 0.0):.2f}",
+            'sla_loss': f"{if_data.get('sla_loss', 0.0)*100:.1f}" if if_data.get('sla_loss', 0) <= 1 else f"{if_data.get('sla_loss', 0):.1f}",
+            'sla_penalty': f"{if_data.get('sla_penalty', 0.0):.3f}",
+            'sla_factor': f"{if_data.get('sla_factor', 1.0):.3f}",
+            'sla_m': if_data.get('sla_m', 100),
+            'sla_h': if_data.get('sla_h', 200),
+            'sla_c': if_data.get('sla_c', 50),
         }
         print(status_format.format(**fmt_data))
 
