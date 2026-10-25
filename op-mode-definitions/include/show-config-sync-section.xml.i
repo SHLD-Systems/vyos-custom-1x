@@ -434,6 +434,26 @@
     </leafNode>
   </children>
 </node>
+<node name="load-balancing">
+  <properties>
+    <help>Load balancing</help>
+  </properties>
+  <command>${vyos_op_scripts_dir}/config_sync.py show_sync_diff --section="load-balancing" --source="$5"</command>
+  <children>
+    <leafNode name="haproxy">
+      <properties>
+        <help>HAProxy load balancing</help>
+      </properties>
+      <command>${vyos_op_scripts_dir}/config_sync.py show_sync_diff --section="load-balancing haproxy" --source="$5"</command>
+    </leafNode>
+    <leafNode name="wan">
+      <properties>
+        <help>WAN load balancing</help>
+      </properties>
+      <command>${vyos_op_scripts_dir}/config_sync.py show_sync_diff --section="load-balancing wan" --source="$5"</command>
+    </leafNode>
+  </children>
+</node>
 <leafNode name="vpn">
   <properties>
     <help>Virtual Private Network (VPN)</help>
